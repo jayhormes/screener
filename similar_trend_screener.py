@@ -822,6 +822,7 @@ class DataProcessor:
                 end_ts,
                 validate=not is_reference,  # Disable validation for reference trends
                 timeframe=timeframe
+                retry_count=3
             )
         else:  # stock
             success, df = self.downloader.get_data(
@@ -830,6 +831,7 @@ class DataProcessor:
                 end_ts,
                 validate=not is_reference,  # Disable validation for reference trends
                 timeframe=timeframe
+                retry_count=0
             )
 
         if not success or df is None or df.empty:

@@ -118,7 +118,7 @@ def process_crypto(symbol, timeframe, days):
         start_ts = now - int(required_bars * interval_seconds * buffer_factor)
         
         # Get crypto data
-        success, data = cd.get_data(symbol, start_ts=start_ts, end_ts=now, timeframe=timeframe, atr=True)
+        success, data = cd.get_data(symbol, start_ts=start_ts, end_ts=now, timeframe=timeframe, atr=True, retry_count=3)
         
         if not success or data.empty:
             error_msg = "Failed to get data or empty dataset"

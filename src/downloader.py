@@ -278,7 +278,7 @@ class CryptoDownloader:
 
         return True
 
-    def get_data(self, crypto, start_ts=None, end_ts=None, timeframe="4h", dropna=True, atr=True, validate=True) -> tuple[bool, pd.DataFrame]:
+    def get_data(self, crypto, start_ts=None, end_ts=None, timeframe="4h", dropna=True, atr=True, validate=True, retry_count=0) -> tuple[bool, pd.DataFrame]:
         """
         Get cryptocurrency data with SMA calculation and data quality validation
         Args:
@@ -427,6 +427,12 @@ class CryptoDownloader:
             return True, df
 
         except Exception as e:
-            print(f"{crypto} -> Error: {e}")
-            return False, pd.DataFrame()
+            error_message = str(e)
+            if "APIError(code=-1003)" in error_message and retry_count < 3:
+                print(f"{crypto} -> API rate limit reached. Waiting 60 seconds before retrying... (Attempt {retry_count+1}/3)")
+                time.sleep(60)
+                return self.get_data(crypto, start_ts, end_ts, timeframe, dropna, atr, validate, retry_count=retry_count+1)
+            else:
+                print(f"{crypto} -> Error: {e}")
+                return False, pd.DataFrame()
         
