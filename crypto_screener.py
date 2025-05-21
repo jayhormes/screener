@@ -93,6 +93,9 @@ def process_crypto(symbol, timeframe, days):
     """Process a single cryptocurrency and calculate its RS score"""
     try:
         cd = CryptoDownloader()
+
+        # 限制每個 process 每次 API 呼叫間隔 (例如 0.1 秒)
+        time.sleep(0.1)        
         
         # Calculate required bars
         required_bars = calc_total_bars(timeframe, days)

@@ -821,7 +821,7 @@ class DataProcessor:
                 buffer_start_ts,
                 end_ts,
                 validate=not is_reference,  # Disable validation for reference trends
-                timeframe=timeframe
+                timeframe=timeframe,
                 retry_count=3
             )
         else:  # stock
@@ -830,7 +830,7 @@ class DataProcessor:
                 buffer_start_ts,
                 end_ts,
                 validate=not is_reference,  # Disable validation for reference trends
-                timeframe=timeframe
+                timeframe=timeframe,
                 retry_count=0
             )
 

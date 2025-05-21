@@ -425,10 +425,11 @@ class CryptoDownloader:
             
             print(f"{crypto} -> Get data from binance successfully ({len(df)} rows from {datetime.fromtimestamp(df['timestamp'].iloc[0])} to {datetime.fromtimestamp(df['timestamp'].iloc[-1])})")
             return True, df
-
+            
         except Exception as e:
             error_message = str(e)
             if "APIError(code=-1003)" in error_message and retry_count < 3:
+                print(e)
                 print(f"{crypto} -> API rate limit reached. Waiting 60 seconds before retrying... (Attempt {retry_count+1}/3)")
                 time.sleep(60)
                 return self.get_data(crypto, start_ts, end_ts, timeframe, dropna, atr, validate, retry_count=retry_count+1)
