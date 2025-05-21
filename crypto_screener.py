@@ -163,7 +163,8 @@ if __name__ == '__main__':
     print(f"Total cryptos to process: {len(all_cryptos)}")
     
     # Process all cryptos using ProcessPoolExecutor
-    num_cores = min(4, mp.cpu_count())  # Use maximum 4 cores, binance rest api has rate limit
+    #num_cores = min(4, mp.cpu_count())  # Use maximum 4 cores, binance rest api has rate limit
+    num_cores = 1
     print(f"Using {num_cores} processes")
     with ProcessPoolExecutor(max_workers=num_cores) as executor:
         futures = {executor.submit(process_crypto, crypto, timeframe, days): crypto for crypto in all_cryptos}
