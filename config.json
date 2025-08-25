@@ -1,7 +1,7 @@
 {
     "discord": {
-        "webhook_url": "",
-        "enabled": false,
+        "webhook_url": "https://discord.com/api/webhooks/999920488887353455/-6TPJEd_pIdZkPJtAaztXn6vQSS-SU_EfegBMGz7nYJjiVpd5r2if6NfXmMq2tdjc7Wk",
+        "enabled": true,
         "delete_files_after_upload": true,
         "cleanup_old_folders_days": 7
     },
