@@ -145,6 +145,33 @@ Where:
 
 ## Configuration
 
+### config.json Settings
+
+The `config.json` file contains various configuration options:
+
+```json
+{
+    "discord": {
+        "webhook_url": "",
+        "enabled": false
+    },
+    "crypto_screener": {
+        "default_timeframe": "15m",
+        "default_days": 3
+    },
+    "trend_finder": {
+        "save_images": true,
+        "image_format": "png",
+        "image_dpi": 150
+    }
+}
+```
+
+**Trend Finder Settings:**
+- `save_images`: Enable/disable image saving to save disk space (default: true)
+- `image_format`: Image format for saved charts (default: "png")
+- `image_dpi`: Image resolution for saved charts (default: 150)
+
 ### Reference Trends (for DTW-based tools)
 
 Define reference patterns in the `REFERENCE_TRENDS` dictionary:

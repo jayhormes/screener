@@ -1,0 +1,17 @@
+{
+    "discord": {
+        "webhook_url": "",
+        "enabled": false,
+        "delete_files_after_upload": true,
+        "cleanup_old_folders_days": 7
+    },
+    "crypto_screener": {
+        "default_timeframe": "15m",
+        "default_days": 3
+    },
+    "trend_finder": {
+        "save_images": false,
+        "image_format": "png",
+        "image_dpi": 150
+    }
+}
