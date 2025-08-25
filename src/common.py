@@ -9,7 +9,7 @@ import time
 import pickle
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from pytz import timezone
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple
@@ -1052,6 +1052,128 @@ def filter_non_overlapping_results(results: List[Dict], global_filtering: bool =
         return all_selected_results
 
 
+# ================ Cleanup Utilities ================
+
+def cleanup_old_folders(base_folder: str, days_to_keep: int = 7, folder_pattern: str = "%Y-%m-%d") -> None:
+    """
+    Clean up old date folders in the specified directory
+    
+    Args:
+        base_folder: Base output folder path
+        days_to_keep: Number of days to keep folders for
+        folder_pattern: Date format pattern for folder names (default: "%Y-%m-%d")
+    """
+    if not os.path.exists(base_folder):
+        return
+    
+    try:
+        cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+        deleted_folders = []
+        
+        for folder_name in os.listdir(base_folder):
+            folder_path = os.path.join(base_folder, folder_name)
+            
+            # Skip if not a directory
+            if not os.path.isdir(folder_path):
+                continue
+                
+            # Try to parse folder name as date
+            try:
+                folder_date = datetime.strptime(folder_name, folder_pattern)
+                
+                # If folder is older than cutoff date, delete it
+                if folder_date < cutoff_date:
+                    # Check if folder is empty or has old files
+                    try:
+                        files_in_folder = os.listdir(folder_path)
+                        if not files_in_folder:
+                            # Empty folder, safe to delete
+                            os.rmdir(folder_path)
+                            deleted_folders.append(folder_name)
+                        else:
+                            # Has files, delete files older than cutoff and then folder if empty
+                            files_deleted = []
+                            for file_name in files_in_folder:
+                                file_path = os.path.join(folder_path, file_name)
+                                file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+                                if file_mtime < cutoff_date:
+                                    os.remove(file_path)
+                                    files_deleted.append(file_name)
+                            
+                            # Check if folder is now empty
+                            if not os.listdir(folder_path):
+                                os.rmdir(folder_path)
+                                deleted_folders.append(folder_name)
+                                
+                    except Exception as e:
+                        print(f"⚠️ Warning: Could not process folder {folder_path}: {e}")
+                        
+            except ValueError:
+                # Not a date folder, skip
+                continue
+                
+        if deleted_folders:
+            print(f"🗑️ Cleaned up old folders in {base_folder}: {', '.join(deleted_folders)}")
+            
+    except Exception as e:
+        print(f"⚠️ Warning: Error during folder cleanup in {base_folder}: {e}")
+
+
+def cleanup_old_timestamped_folders(base_folder: str, days_to_keep: int = 7) -> None:
+    """
+    Clean up old timestamped folders in the specified directory
+    This function looks for folders with timestamp patterns like "2025-08-25_14-30"
+    
+    Args:
+        base_folder: Base output folder path
+        days_to_keep: Number of days to keep folders for
+    """
+    if not os.path.exists(base_folder):
+        return
+    
+    try:
+        cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+        deleted_folders = []
+        
+        for folder_name in os.listdir(base_folder):
+            folder_path = os.path.join(base_folder, folder_name)
+            
+            # Skip if not a directory
+            if not os.path.isdir(folder_path):
+                continue
+                
+            # Try to parse folder name as timestamp (various patterns)
+            timestamp_patterns = [
+                "%Y-%m-%d_%H-%M",      # 2025-08-25_14-30
+                "%Y-%m-%d_%H-%M-%S",   # 2025-08-25_14-30-15
+                "%Y%m%d_%H%M",         # 20250825_1430
+                "%Y%m%d_%H%M%S",       # 20250825_143015
+            ]
+            
+            folder_date = None
+            for pattern in timestamp_patterns:
+                try:
+                    folder_date = datetime.strptime(folder_name, pattern)
+                    break
+                except ValueError:
+                    continue
+            
+            if folder_date and folder_date < cutoff_date:
+                # This is an old timestamped folder, delete it
+                try:
+                    import shutil
+                    shutil.rmtree(folder_path)
+                    deleted_folders.append(folder_name)
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not delete folder {folder_path}: {e}")
+                    
+        if deleted_folders:
+            print(f"🗑️ Cleaned up old timestamped folders in {base_folder}: {', '.join(deleted_folders)}")
+            
+    except Exception as e:
+        print(f"⚠️ Warning: Error during timestamped folder cleanup in {base_folder}: {e}")
+
+
 # ================ Export Functions ================
 
 __all__ = [
@@ -1072,4 +1194,6 @@ __all__ = [
     'create_output_directory',
     'get_period_overlap',
     'filter_non_overlapping_results',
+    'cleanup_old_folders',
+    'cleanup_old_timestamped_folders',
 ]

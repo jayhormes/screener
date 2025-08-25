@@ -3,7 +3,7 @@ import time
 import os
 import numpy as np
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from src.downloader import CryptoDownloader
 from src.discord_notifier import get_discord_notifier
 from src.message_formatter import CryptoMessageFormatter
@@ -21,6 +21,70 @@ def load_config(config_path="config.json"):
     except Exception as e:
         print(f"Error loading config: {e}")
         return {}
+
+
+def cleanup_old_folders(base_folder="output", days_to_keep=7):
+    """
+    Clean up old date folders in the output directory
+    
+    Args:
+        base_folder: Base output folder path
+        days_to_keep: Number of days to keep folders for
+    """
+    if not os.path.exists(base_folder):
+        return
+    
+    try:
+        cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+        deleted_folders = []
+        
+        for folder_name in os.listdir(base_folder):
+            folder_path = os.path.join(base_folder, folder_name)
+            
+            # Skip if not a directory
+            if not os.path.isdir(folder_path):
+                continue
+                
+            # Try to parse folder name as date (YYYY-MM-DD format)
+            try:
+                folder_date = datetime.strptime(folder_name, "%Y-%m-%d")
+                
+                # If folder is older than cutoff date, delete it
+                if folder_date < cutoff_date:
+                    # Check if folder is empty or has old files
+                    try:
+                        files_in_folder = os.listdir(folder_path)
+                        if not files_in_folder:
+                            # Empty folder, safe to delete
+                            os.rmdir(folder_path)
+                            deleted_folders.append(folder_name)
+                        else:
+                            # Has files, delete files older than cutoff and then folder if empty
+                            files_deleted = []
+                            for file_name in files_in_folder:
+                                file_path = os.path.join(folder_path, file_name)
+                                file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+                                if file_mtime < cutoff_date:
+                                    os.remove(file_path)
+                                    files_deleted.append(file_name)
+                            
+                            # Check if folder is now empty
+                            if not os.listdir(folder_path):
+                                os.rmdir(folder_path)
+                                deleted_folders.append(folder_name)
+                                
+                    except Exception as e:
+                        print(f"⚠️ Warning: Could not process folder {folder_path}: {e}")
+                        
+            except ValueError:
+                # Not a date folder, skip
+                continue
+                
+        if deleted_folders:
+            print(f"🗑️ Cleaned up old folders: {', '.join(deleted_folders)}")
+            
+    except Exception as e:
+        print(f"⚠️ Warning: Error during folder cleanup: {e}")
 
 
 def calc_total_bars(time_interval, days):
@@ -292,10 +356,40 @@ if __name__ == '__main__':
             
         if file_success:
             print("✅ Successfully sent file to Discord!")
+            # Delete the file after successful upload to save space (if enabled in config)
+            config = load_config()
+            delete_after_upload = config.get("discord", {}).get("delete_files_after_upload", True)
+            
+            if delete_after_upload:
+                try:
+                    os.remove(file_path)
+                    print(f"🗑️ Deleted file after successful upload: {file_path}")
+                    
+                    # Check if the date folder is now empty and remove it
+                    date_folder_path = os.path.dirname(file_path)
+                    try:
+                        # Check if folder is empty
+                        if not os.listdir(date_folder_path):
+                            os.rmdir(date_folder_path)
+                            print(f"🗑️ Deleted empty date folder: {date_folder_path}")
+                    except Exception as e:
+                        print(f"⚠️ Warning: Could not delete empty folder {date_folder_path}: {e}")
+                        
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not delete file {file_path}: {e}")
+            else:
+                print(f"📁 File preserved (delete_files_after_upload=false): {file_path}")
         else:
             print("❌ Failed to send file to Discord")
             
     elif not discord_notifier.enabled:
         print("Discord notifications are disabled in config")
+    
+    # Clean up old folders if configured
+    config = load_config()
+    cleanup_days = config.get("discord", {}).get("cleanup_old_folders_days", 7)
+    if cleanup_days > 0:
+        print(f"\nCleaning up folders older than {cleanup_days} days...")
+        cleanup_old_folders("output", cleanup_days)
     
     # print(f"Failed cryptos saved to {failed_path}")
