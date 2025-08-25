@@ -43,6 +43,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import argparse
 from src.downloader import CryptoDownloader
+from src.discord_notifier import get_trend_finder_discord_notifier
+from src.message_formatter import TrendFinderMessageFormatter
 from src.common import (
    TrendAnalysisConfig,
    DataNormalizer,
@@ -1175,6 +1177,37 @@ def main():
     end_time = time.time()
     runtime = end_time - start_time
     print(f"\nTotal runtime: {runtime:.2f} seconds ({runtime/60:.2f} minutes)")
+    
+    # Send Discord notifications
+    try:
+        discord_notifier = get_trend_finder_discord_notifier()
+        if discord_notifier.enabled:
+            print("\n📱 Sending Discord notifications...")
+            
+            # Format and send overall summary
+            formatted_summary = TrendFinderMessageFormatter.format_overall_summary(
+                overall_summary_text, runtime
+            )
+            
+            # Send quick summary first
+            quick_summary = TrendFinderMessageFormatter.format_quick_summary(all_results)
+            discord_notifier.send_message(quick_summary)
+            
+            # Send detailed results
+            success = discord_notifier.send_trend_finder_results(
+                overall_summary=formatted_summary,
+                timeframe_results=all_results,
+                summary_file_path=overall_summary_file
+            )
+            
+            if success:
+                print("✅ Discord notifications sent successfully!")
+            else:
+                print("❌ Some Discord notifications failed to send")
+        else:
+            print("📱 Discord notifications disabled in config")
+    except Exception as e:
+        print(f"❌ Error sending Discord notifications: {e}")
 
 
 if __name__ == "__main__":

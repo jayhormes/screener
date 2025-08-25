@@ -213,3 +213,214 @@ class GeneralMessageFormatter:
         message += f"{content}"
         
         return message
+
+
+class TrendFinderMessageFormatter:
+    """
+    Utility class for formatting trend finder messages for Discord
+    """
+    
+    @staticmethod
+    def format_overall_summary(overall_summary: str, runtime: float = None) -> str:
+        """
+        Format overall trend finder summary for Discord
+        
+        Args:
+            overall_summary: Raw overall summary text
+            runtime: Optional runtime in seconds
+            
+        Returns:
+            str: Formatted Discord message
+        """
+        # Extract key information from summary
+        lines = overall_summary.split('\n')
+        
+        message = "🔍 **Crypto Trend Finder - Analysis Complete**\n\n"
+        
+        # Add timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message += f"**📅 Analysis Time:** {timestamp}\n"
+        
+        if runtime:
+            message += f"**⏱️ Runtime:** {runtime:.1f}s ({runtime/60:.1f}min)\n"
+        
+        # Extract configuration info
+        config_lines = []
+        stats_started = False
+        
+        for line in lines:
+            if line.startswith("Past Extension Factor:"):
+                config_lines.append(line)
+            elif line.startswith("Future Extension Factor:"):
+                config_lines.append(line)
+            elif line.startswith("Overlap Filtering:"):
+                config_lines.append(line)
+            elif "OVERALL STATISTICS" in line:
+                stats_started = True
+                break
+        
+        if config_lines:
+            message += "\n**⚙️ Configuration:**\n"
+            for line in config_lines:
+                message += f"• {line}\n"
+        
+        # Add brief statistics summary
+        if stats_started:
+            message += "\n**📊 Analysis Results:**\n"
+            message += "• Pattern matching completed across multiple timeframes\n"
+            message += "• Statistical analysis generated\n"
+            message += "• Detailed results available in full report\n"
+        
+        return message
+    
+    @staticmethod
+    def format_timeframe_results(timeframe: str, results: dict, max_results: int = 5) -> str:
+        """
+        Format timeframe results for Discord
+        
+        Args:
+            timeframe: Timeframe string (e.g., "15m", "1h")
+            results: Results dictionary for the timeframe
+            max_results: Maximum number of results to show per reference
+            
+        Returns:
+            str: Formatted Discord message
+        """
+        message = f"📊 **{timeframe} Timeframe Analysis**\n\n"
+        
+        if not results:
+            message += "No results found for this timeframe."
+            return message
+        
+        for reference_key, result_data in results.items():
+            reference_symbol, reference_timeframe, reference_label = reference_key
+            top_results = result_data.get("top_results", [])
+            statistics = result_data.get("statistics", {})
+            
+            message += f"**🎯 Reference: {reference_symbol} ({reference_timeframe}, {reference_label})**\n"
+            
+            # Add statistics
+            if statistics:
+                total_patterns = statistics.get('total_patterns', 0)
+                message += f"• **Total Patterns:** {total_patterns}\n"
+                
+                # Future trend analysis summary
+                future_trends = statistics.get('future_trend_analysis', {})
+                if future_trends:
+                    # Get the most relevant extension factor (usually 1.0x)
+                    key_factor = "1.0x" if "1.0x" in future_trends else list(future_trends.keys())[0] if future_trends else None
+                    if key_factor:
+                        analysis = future_trends[key_factor]
+                        rise_pct = analysis.get('rise_percentage', 0)
+                        fall_pct = analysis.get('fall_percentage', 0)
+                        message += f"• **Future Trends ({key_factor}):** {rise_pct:.1f}% Rise, {fall_pct:.1f}% Fall\n"
+            
+            # Add top matches
+            if top_results:
+                message += f"\n**🏆 Top {min(len(top_results), max_results)} Matches:**\n"
+                for i, result in enumerate(top_results[:max_results]):
+                    symbol = result["symbol"]
+                    score = result["similarity"]
+                    # Remove USDT suffix for cleaner display
+                    display_symbol = symbol[:-4] if symbol.endswith('USDT') else symbol
+                    message += f"{i+1}. **{display_symbol}** - Score: {score:.4f}\n"
+            else:
+                message += "\n• No matching patterns found\n"
+            
+            message += "\n"
+        
+        return message
+    
+    @staticmethod
+    def format_reference_summary(reference_symbol: str, 
+                                reference_timeframe: str, 
+                                reference_label: str,
+                                statistics: dict,
+                                top_results: list,
+                                max_results: int = 10) -> str:
+        """
+        Format reference trend summary for Discord
+        
+        Args:
+            reference_symbol: Reference symbol
+            reference_timeframe: Reference timeframe
+            reference_label: Reference label
+            statistics: Statistics dictionary
+            top_results: List of top results
+            max_results: Maximum results to show
+            
+        Returns:
+            str: Formatted Discord message
+        """
+        message = f"🎯 **Reference Analysis: {reference_symbol}**\n"
+        message += f"**📈 Pattern:** {reference_timeframe}, {reference_label}\n\n"
+        
+        # Statistics summary
+        if statistics:
+            total = statistics.get('total_patterns', 0)
+            message += f"**📊 Found {total} Similar Patterns**\n\n"
+            
+            # Future trend analysis
+            future_trends = statistics.get('future_trend_analysis', {})
+            if future_trends:
+                message += "**🔮 Future Trend Predictions:**\n"
+                for factor, analysis in list(future_trends.items())[:3]:  # Show top 3 factors
+                    rise_pct = analysis.get('rise_percentage', 0)
+                    fall_pct = analysis.get('fall_percentage', 0)
+                    total_analyzed = analysis.get('total_analyzed', 0)
+                    
+                    if total_analyzed > 0:
+                        message += f"• **{factor} Extension:** {rise_pct:.1f}% Rise, {fall_pct:.1f}% Fall ({total_analyzed} patterns)\n"
+        
+        # Top matches
+        if top_results:
+            message += f"\n**🏆 Top {min(len(top_results), max_results)} Matches:**\n"
+            for i, result in enumerate(top_results[:max_results]):
+                symbol = result["symbol"]
+                score = result["similarity"]
+                display_symbol = symbol[:-4] if symbol.endswith('USDT') else symbol
+                message += f"{i+1}. **{display_symbol}** - {score:.4f}\n"
+        
+        return message
+    
+    @staticmethod
+    def format_quick_summary(all_results: dict) -> str:
+        """
+        Format a quick summary of all results for Discord
+        
+        Args:
+            all_results: Dictionary of all results by timeframe
+            
+        Returns:
+            str: Formatted quick summary
+        """
+        message = "⚡ **Quick Summary - Trend Finder Results**\n\n"
+        
+        total_patterns = 0
+        total_references = 0
+        timeframes_processed = 0
+        
+        for timeframe, timeframe_results in all_results.items():
+            if timeframe_results:
+                timeframes_processed += 1
+                message += f"**{timeframe}:** "
+                
+                timeframe_patterns = 0
+                references_in_timeframe = 0
+                
+                for reference_key, result_data in timeframe_results.items():
+                    references_in_timeframe += 1
+                    top_results = result_data.get("top_results", [])
+                    timeframe_patterns += len(top_results)
+                
+                message += f"{timeframe_patterns} patterns from {references_in_timeframe} references\n"
+                total_patterns += timeframe_patterns
+                total_references += references_in_timeframe
+        
+        message += f"\n**📊 Total:** {total_patterns} patterns across {timeframes_processed} timeframes\n"
+        message += f"**🎯 References:** {total_references // timeframes_processed if timeframes_processed > 0 else 0} reference trends analyzed\n"
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message += f"**⏰ Completed:** {timestamp}"
+        
+        return message
