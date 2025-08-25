@@ -11,15 +11,19 @@
         "send_detailed_results": true,
         "send_overall_summary": true,
         "max_results_per_message": 10,
-        "delete_files_after_upload": true
+        "delete_files_after_upload": true,
+        "send_charts": true,
+        "chart_min_score": 0.80,
+        "max_charts_per_timeframe": 3,
+        "chart_image_quality": "medium"
     },
     "crypto_screener": {
         "default_timeframe": "15m",
         "default_days": 3
     },
     "trend_finder": {
-        "save_images": false,
+        "save_images": true,
         "image_format": "png",
-        "image_dpi": 150
+        "image_dpi": 100
     }
 }

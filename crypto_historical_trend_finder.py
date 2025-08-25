@@ -823,7 +823,7 @@ def create_visualizations_parallel(args: tuple):
         config
     )
     
-    return {'analysis_path': output_path}
+    return {'symbol': symbol, 'analysis_path': output_path, 'timeframe': timeframe}
 
 
 # ================ Main Function ================
@@ -897,6 +897,7 @@ def main():
     # Process each timeframe separately
     all_results = {}
     all_reference_statistics = {}  # Store statistics for overall summary
+    all_visualization_paths = {}  # Store visualization paths for Discord
     
     for timeframe in TIMEFRAMES_TO_ANALYZE:
         print(f"\n{'='*80}")
@@ -1015,7 +1016,16 @@ def main():
                 
                 # Process visualizations in parallel
                 with Pool(processes=min(cpu_count()-1, len(visualization_arguments))) if len(visualization_arguments) > 1 else Pool(processes=1) as pool:
-                    pool.map(create_visualizations_parallel, visualization_arguments)
+                    visualization_results = pool.map(create_visualizations_parallel, visualization_arguments)
+                
+                # Collect visualization paths for Discord
+                if timeframe not in all_visualization_paths:
+                    all_visualization_paths[timeframe] = {}
+                
+                for viz_result in visualization_results:
+                    if viz_result and viz_result.get('analysis_path'):
+                        symbol = viz_result['symbol']
+                        all_visualization_paths[timeframe][symbol] = viz_result['analysis_path']
                 
                 # Add results to summary
                 reference_summary.append("Top Results:")
@@ -1197,7 +1207,8 @@ def main():
             success = discord_notifier.send_trend_finder_results(
                 overall_summary=formatted_summary,
                 timeframe_results=all_results,
-                summary_file_path=overall_summary_file
+                summary_file_path=overall_summary_file,
+                visualization_paths=all_visualization_paths
             )
             
             if success:

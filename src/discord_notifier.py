@@ -29,6 +29,11 @@ class DiscordNotifier:
         self.send_overall_summary = True
         self.max_results_per_message = 10
         self.delete_files_after_upload = True
+        # Chart-specific settings for trend finder
+        self.send_charts = False
+        self.chart_min_score = 0.80
+        self.max_charts_per_timeframe = 3
+        self.chart_image_quality = "medium"
         self._load_config()
     
     def _load_config(self):
@@ -45,6 +50,11 @@ class DiscordNotifier:
                         self.send_overall_summary = discord_config.get('send_overall_summary', True)
                         self.max_results_per_message = discord_config.get('max_results_per_message', 10)
                         self.delete_files_after_upload = discord_config.get('delete_files_after_upload', True)
+                        # Chart settings
+                        self.send_charts = discord_config.get('send_charts', False)
+                        self.chart_min_score = discord_config.get('chart_min_score', 0.80)
+                        self.max_charts_per_timeframe = discord_config.get('max_charts_per_timeframe', 3)
+                        self.chart_image_quality = discord_config.get('chart_image_quality', 'medium')
                     else:
                         # Use regular config
                         discord_config = config.get('discord', {})
@@ -177,7 +187,8 @@ class DiscordNotifier:
     def send_trend_finder_results(self, 
                                  overall_summary: str,
                                  timeframe_results: Dict = None,
-                                 summary_file_path: str = None) -> bool:
+                                 summary_file_path: str = None,
+                                 visualization_paths: Dict = None) -> bool:
         """
         Send trend finder results to Discord
         
@@ -185,6 +196,7 @@ class DiscordNotifier:
             overall_summary: Overall summary text
             timeframe_results: Dictionary of timeframe results
             summary_file_path: Path to summary file
+            visualization_paths: Dictionary of visualization file paths by timeframe and symbol
             
         Returns:
             bool: True if successful, False otherwise
@@ -255,6 +267,10 @@ class DiscordNotifier:
                     else:
                         if not self.send_message(full_message):
                             success = False
+                    
+                    # Send high-score charts if enabled
+                    if self.send_charts and visualization_paths:
+                        self._send_high_score_charts(timeframe, reference_key, top_results, visualization_paths)
         
         # Send summary file if provided
         if summary_file_path and os.path.exists(summary_file_path):
@@ -263,6 +279,85 @@ class DiscordNotifier:
                 success = False
         
         return success
+    
+    def _send_high_score_charts(self, timeframe: str, reference_key: tuple, 
+                               top_results: list, visualization_paths: Dict):
+        """
+        Send charts for high-scoring matches
+        
+        Args:
+            timeframe: Current timeframe
+            reference_key: Reference trend key
+            top_results: List of top results
+            visualization_paths: Dictionary of visualization paths
+        """
+        if not self.send_charts:
+            return
+            
+        charts_sent = 0
+        reference_symbol, reference_timeframe, reference_label = reference_key
+        
+        print(f"📊 Sending charts for {timeframe} timeframe (min score: {self.chart_min_score})...")
+        
+        for result in top_results:
+            if charts_sent >= self.max_charts_per_timeframe:
+                break
+                
+            symbol = result["symbol"]
+            score = result["similarity"]
+            
+            # Only send charts for high-scoring matches
+            if score >= self.chart_min_score:
+                # Look for chart file
+                chart_path = self._find_chart_file(timeframe, symbol, score, visualization_paths)
+                
+                if chart_path and os.path.exists(chart_path):
+                    chart_message = (f"📈 **Chart: {symbol}** (Score: {score:.4f})\n"
+                                   f"Reference: {reference_symbol} ({reference_timeframe}, {reference_label})")
+                    
+                    if self.send_file(chart_path, chart_message):
+                        charts_sent += 1
+                        print(f"✅ Sent chart for {symbol} (score: {score:.4f})")
+                    else:
+                        print(f"❌ Failed to send chart for {symbol}")
+                else:
+                    print(f"⚠️  Chart file not found for {symbol}")
+        
+        if charts_sent > 0:
+            print(f"📊 Sent {charts_sent} charts for {timeframe} timeframe")
+        else:
+            print(f"📊 No charts sent for {timeframe} timeframe (no matches above {self.chart_min_score})")
+    
+    def _find_chart_file(self, timeframe: str, symbol: str, score: float, 
+                        visualization_paths: Dict) -> str:
+        """
+        Find the chart file for a given symbol and score
+        
+        Args:
+            timeframe: Timeframe
+            symbol: Symbol name
+            score: Similarity score
+            visualization_paths: Dictionary of visualization paths
+            
+        Returns:
+            str: Path to chart file if found, None otherwise
+        """
+        if not visualization_paths:
+            return None
+            
+        # Look for visualization paths for this timeframe
+        timeframe_paths = visualization_paths.get(timeframe, {})
+        
+        # Look for exact symbol match
+        if symbol in timeframe_paths:
+            return timeframe_paths[symbol]
+        
+        # Look for files with score in the name
+        for path_symbol, path in timeframe_paths.items():
+            if symbol in path_symbol and f"{score:.4f}" in path:
+                return path
+        
+        return None
     
     def _split_message(self, message: str, max_length: int = 1800) -> List[str]:
         """
