@@ -593,7 +593,7 @@ def get_trend_direction(pattern_df: pd.DataFrame, target_df: pd.DataFrame,
 def create_full_analysis_chart(reference_df: pd.DataFrame, window_df: pd.DataFrame, target_df: pd.DataFrame, 
                              symbol: str, reference_symbol: str, timeframe: str, reference_timeframe: str, 
                              reference_label: str, similarity: float, price_distance: float, diff_distance: float, 
-                             visualization_dir: str) -> str:
+                             visualization_dir: str, config: TrendAnalysisConfig = None) -> str:
     """Create comprehensive visualization with three subplots, all with volume"""
     try:
         # Calculate extension periods
@@ -771,15 +771,18 @@ def create_full_analysis_chart(reference_df: pd.DataFrame, window_df: pd.DataFra
         # Generate output filename with trend direction
         score = similarity
         timestamp = window_df.index[0].strftime("%Y%m%d")
-        output_filename = f"score_{score:.4f}_{symbol}_{timestamp}{trend_suffix}.png"
+        output_filename = f"score_{score:.4f}_{symbol}_{timestamp}{trend_suffix}.{config.image_format if config else 'png'}"
         output_path = os.path.join(visualization_dir, output_filename)
         
-        # Save figure
-        FileManager.ensure_directories(visualization_dir)
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
+        # Save figure only if enabled in config
+        if config and config.save_images:
+            FileManager.ensure_directories(visualization_dir)
+            plt.savefig(output_path, dpi=config.image_dpi, bbox_inches='tight')
+            print(f"Saved full analysis visualization to {output_path}")
+        else:
+            print(f"Image saving disabled, visualization created but not saved: {output_filename}")
         
-        print(f"Saved full analysis visualization to {output_path}")
+        plt.close(fig)
         return output_path
         
     except Exception as e:
@@ -787,12 +790,13 @@ def create_full_analysis_chart(reference_df: pd.DataFrame, window_df: pd.DataFra
         # Return a default path in case of error
         score = similarity
         timestamp = window_df.index[0].strftime("%Y%m%d") if not window_df.empty else "unknown"
-        return os.path.join(visualization_dir, f"score_{score:.4f}_{symbol}_{timestamp}_error.png")
+        image_format = config.image_format if config else 'png'
+        return os.path.join(visualization_dir, f"score_{score:.4f}_{symbol}_{timestamp}_error.{image_format}")
     
 
 def create_visualizations_parallel(args: tuple):
     """Worker function for parallel visualization"""
-    target_df, result, reference_df, symbol, timeframe, reference_symbol, reference_timeframe, reference_label, visualization_dir = args
+    target_df, result, reference_df, symbol, timeframe, reference_symbol, reference_timeframe, reference_label, visualization_dir, config = args
     
     if result is None or result["window_data"] is None:
         return None
@@ -813,7 +817,8 @@ def create_visualizations_parallel(args: tuple):
         result["similarity"],
         result["price_distance"],
         result["diff_distance"],
-        visualization_dir
+        visualization_dir,
+        config
     )
     
     return {'analysis_path': output_path}
@@ -1002,7 +1007,8 @@ def main():
                         reference_symbol,       # Reference symbol
                         reference_timeframe,    # Reference timeframe
                         reference_label,        # Reference label
-                        visualization_directory # Visualization directory
+                        visualization_directory,# Visualization directory
+                        config                  # Configuration object
                     ))
                 
                 # Process visualizations in parallel

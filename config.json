@@ -6,5 +6,10 @@
     "crypto_screener": {
         "default_timeframe": "15m",
         "default_days": 3
+    },
+    "trend_finder": {
+        "save_images": false,
+        "image_format": "png",
+        "image_dpi": 150
     }
 }

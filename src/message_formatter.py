@@ -47,7 +47,11 @@ class CryptoMessageFormatter:
         display_targets = targets[:max_targets]
         for idx, crypto in enumerate(display_targets, 1):
             score = target_scores[crypto]
-            message += f"{idx}. {crypto}: {score:.6f}\n"
+            # Remove USDT suffix if present, keep other suffixes like USDC
+            display_symbol = crypto
+            if crypto.endswith('USDT'):
+                display_symbol = crypto[:-4]  # Remove 'USDT'
+            message += f"{idx}. {display_symbol}: {score:.6f}\n"
         
         # Add summary statistics
         message += f"\n📈 Total processed: {total_processed}"
@@ -76,7 +80,11 @@ class CryptoMessageFormatter:
         display_targets = targets[:max_targets]
         for idx, crypto in enumerate(display_targets, 1):
             score = target_scores[crypto]
-            message += f"{idx}. {crypto}: {score:.6f}\n"
+            # Remove USDT suffix if present, keep other suffixes like USDC
+            display_symbol = crypto
+            if crypto.endswith('USDT'):
+                display_symbol = crypto[:-4]  # Remove 'USDT'
+            message += f"{idx}. {display_symbol}: {score:.6f}\n"
         
         return message
     

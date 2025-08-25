@@ -218,7 +218,11 @@ if __name__ == '__main__':
     print("\n=========================== Target : Score (TOP 20) ===========================")
     for idx, crypto in enumerate(targets[:20], 1):
         score = target_score[crypto]
-        print(f"{idx}. {crypto}: {score:.6f}")
+        # Remove USDT suffix if present, keep other suffixes like USDC
+        display_symbol = crypto
+        if crypto.endswith('USDT'):
+            display_symbol = crypto[:-4]  # Remove 'USDT'
+        print(f"{idx}. {display_symbol}: {score:.6f}")
     print("===============================================================================")
     
     # Save results

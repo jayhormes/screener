@@ -19,6 +19,7 @@ from shapedtw.shapeDescriptors import SlopeDescriptor, PAADescriptor, CompoundDe
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
+import json
 
 
 # ================ Configuration Management ================
@@ -26,7 +27,7 @@ from matplotlib.patches import Rectangle
 class TrendAnalysisConfig:
     """Configuration manager for trend analysis parameters"""
     
-    def __init__(self):
+    def __init__(self, config_file_path: str = "config.json"):
         # Default SMA periods
         self.sma_periods = [30, 45, 60]
         
@@ -48,6 +49,35 @@ class TrendAnalysisConfig:
         
         # Minimum query length
         self.min_query_length = 60
+        
+        # Default image settings
+        self.save_images = True
+        self.image_format = "png"
+        self.image_dpi = 150
+        
+        # Load configuration from file if it exists
+        self.load_config(config_file_path)
+    
+    def load_config(self, config_file_path: str):
+        """Load configuration from JSON file"""
+        try:
+            if os.path.exists(config_file_path):
+                with open(config_file_path, 'r', encoding='utf-8') as f:
+                    config_data = json.load(f)
+                
+                # Load trend_finder settings if available
+                if 'trend_finder' in config_data:
+                    trend_config = config_data['trend_finder']
+                    self.save_images = trend_config.get('save_images', True)
+                    self.image_format = trend_config.get('image_format', 'png')
+                    self.image_dpi = trend_config.get('image_dpi', 150)
+                    
+                print(f"Configuration loaded from {config_file_path}")
+                print(f"Image saving: {'Enabled' if self.save_images else 'Disabled'}")
+            else:
+                print(f"Configuration file {config_file_path} not found, using defaults")
+        except Exception as e:
+            print(f"Error loading configuration: {e}, using defaults")
         
         # API settings
         self.api_sleep_seconds = 0.5
