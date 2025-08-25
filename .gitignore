@@ -3,3 +3,5 @@
 trade
 output
 /src/__pycache__/*.pyc
+historical_trend_finder_reports
+similarity_output

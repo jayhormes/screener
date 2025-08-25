@@ -5,6 +5,14 @@
         "delete_files_after_upload": true,
         "cleanup_old_folders_days": 7
     },
+    "discord_trend_finder": {
+        "webhook_url": "https://discord.com/api/webhooks/1409451726460686376/hVl3-v598vxNAE6m4YHg8g1Rc2WjxA5NGheNp9DFmrOUXPXOdCMcCSBtLgtmAV2Ooc-B",
+        "enabled": true,
+        "send_detailed_results": true,
+        "send_overall_summary": true,
+        "max_results_per_message": 10,
+        "delete_files_after_upload": true
+    },
     "crypto_screener": {
         "default_timeframe": "15m",
         "default_days": 3,
