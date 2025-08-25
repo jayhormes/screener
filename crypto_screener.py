@@ -2,10 +2,25 @@ import argparse
 import time
 import os
 import numpy as np
+import json
 from datetime import datetime
-import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from src.downloader import CryptoDownloader
+from src.discord_notifier import get_discord_notifier
+from src.message_formatter import CryptoMessageFormatter
+
+
+def load_config(config_path="config.json"):
+    """Load configuration from config.json"""
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+            print(f"Config file {config_path} not found, using defaults")
+            return {}
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        return {}
 
 
 def calc_total_bars(time_interval, days):
@@ -145,9 +160,14 @@ def process_crypto(symbol, timeframe, days):
 
 
 if __name__ == '__main__':
+    # Load configuration
+    config = load_config()
+    
     parser = argparse.ArgumentParser()
-    parser.add_argument('-t', '--timeframe', type=str, help='Time frame (5m, 15m, 30m, 1h, 2h, 4h, 8h, 1d)', default="15m")
-    parser.add_argument('-d', '--days', type=int, help='Calculation duration in days (default 3 days)', default=3)
+    parser.add_argument('-t', '--timeframe', type=str, help='Time frame (5m, 15m, 30m, 1h, 2h, 4h, 8h, 1d)', 
+                       default=config.get('crypto_screener', {}).get('default_timeframe', '15m'))
+    parser.add_argument('-d', '--days', type=int, help='Calculation duration in days (default 3 days)', 
+                       default=config.get('crypto_screener', {}).get('default_days', 3))
     args = parser.parse_args()
     timeframe = args.timeframe
     days = args.days
@@ -159,21 +179,21 @@ if __name__ == '__main__':
     all_cryptos = crypto_downloader.get_all_symbols()
     print(f"Total cryptos to process: {len(all_cryptos)}")
     
-    # Process all cryptos using ProcessPoolExecutor
-    num_cores = min(4, mp.cpu_count())  # Use maximum 4 cores, binance rest api has rate limit
-    print(f"Using {num_cores} processes")
-    with ProcessPoolExecutor(max_workers=num_cores) as executor:
-        futures = {executor.submit(process_crypto, crypto, timeframe, days): crypto for crypto in all_cryptos}
-        results = []
+    # Process all cryptos sequentially (single process to avoid API rate limits)
+    print("Using single process to avoid API rate limits")
+    results = []
+    
+    for i, crypto in enumerate(all_cryptos, 1):
+        print(f"Processing {i}/{len(all_cryptos)}: {crypto}")
+        try:
+            result = process_crypto(crypto, timeframe, days)
+            results.append(result)
+        except Exception as e:
+            print(f"{crypto} -> Error: {str(e)}")
+            results.append({"crypto": crypto, "status": "failed", "reason": str(e)})
         
-        for future in as_completed(futures):
-            crypto = futures[future]
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as e:
-                print(f"{crypto} -> Error: {str(e)}")
-                results.append({"crypto": crypto, "status": "failed", "reason": str(e)})
+        # Add a small delay between requests to be respectful to the API
+        time.sleep(0.1)
     
     # Process results
     failed_targets = []     # Failed to download data or error happened
@@ -204,11 +224,12 @@ if __name__ == '__main__':
     # Save results
     full_date_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
     date_str = datetime.now().strftime("%Y-%m-%d")
-    txt_content = "###BTCETH\nBINANCE:BTCUSDT.P,BINANCE:ETHUSDT\n###Targets (Sort by score)\n"
+    txt_content = "###Targets (Sort by score)\n"
     
-    # Add all targets
+    # Add only TOP 20 targets
     if targets:
-        txt_content += ",".join([f"BINANCE:{crypto}.P" for crypto in targets])
+        top_20_targets = targets[:20]
+        txt_content += ",".join([f"BINANCE:{crypto}.P" for crypto in top_20_targets])
     
     # Create output/<date> directory structure
     base_folder = "output"
@@ -229,4 +250,48 @@ if __name__ == '__main__':
     #         f.write(f"{crypto}: {reason}\n")
     
     print(f"\nResults saved to {file_path}")
+    
+    # Send to Discord if enabled in config
+    discord_notifier = get_discord_notifier()
+    if targets and discord_notifier.enabled:
+        print("\nSending results to Discord...")
+        
+        # Format the message using the message formatter
+        formatted_message = CryptoMessageFormatter.format_crypto_results(
+            targets=targets,
+            target_scores=target_score,
+            timeframe=timeframe,
+            days=days,
+            total_processed=len(all_cryptos),
+            failed_count=len(failed_targets),
+            timestamp=full_date_str,
+            max_targets=20
+        )
+        
+        # Format file message
+        file_message = CryptoMessageFormatter.format_file_message(
+            timeframe=timeframe,
+            days=days
+        )
+        
+        # Send message and file separately
+        message_success, file_success = discord_notifier.send_crypto_results_with_file(
+            message=formatted_message,
+            file_path=file_path,
+            file_message=file_message
+        )
+        
+        if message_success:
+            print("✅ Successfully sent message to Discord!")
+        else:
+            print("❌ Failed to send message to Discord")
+            
+        if file_success:
+            print("✅ Successfully sent file to Discord!")
+        else:
+            print("❌ Failed to send file to Discord")
+            
+    elif not discord_notifier.enabled:
+        print("Discord notifications are disabled in config")
+    
     # print(f"Failed cryptos saved to {failed_path}")
