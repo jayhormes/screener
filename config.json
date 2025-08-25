@@ -7,7 +7,13 @@
     },
     "crypto_screener": {
         "default_timeframe": "15m",
-        "default_days": 3
+        "default_days": 3,
+        "rate_limiter": {
+            "base_delay": 0.25,
+            "max_delay": 10.0,
+            "max_requests_per_minute": 2200,
+            "error_backoff_multiplier": 2.0
+        }
     },
     "trend_finder": {
         "save_images": false,

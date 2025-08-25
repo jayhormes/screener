@@ -3,10 +3,99 @@ import time
 import os
 import numpy as np
 import json
+import random
 from datetime import datetime, timedelta
 from src.downloader import CryptoDownloader
 from src.discord_notifier import get_discord_notifier
 from src.message_formatter import CryptoMessageFormatter
+
+
+class RateLimiter:
+    """智能請求頻率控制器"""
+    
+    def __init__(self, config=None):
+        self.request_times = []
+        self.consecutive_errors = 0
+        
+        # 從配置文件讀取參數，如果沒有則使用默認值
+        rate_limit_config = config.get('crypto_screener', {}).get('rate_limiter', {}) if config else {}
+        
+        self.base_delay = rate_limit_config.get('base_delay', 0.25)  # 基礎延遲（秒）
+        self.max_delay = rate_limit_config.get('max_delay', 10.0)   # 最大延遲（秒）
+        self.max_requests_per_minute = rate_limit_config.get('max_requests_per_minute', 2200)  # 保守的每分鐘請求限制
+        self.error_backoff_multiplier = rate_limit_config.get('error_backoff_multiplier', 2.0)  # 錯誤時的延遲倍數
+        
+    def wait_if_needed(self):
+        """在發送請求前檢查是否需要等待"""
+        current_time = time.time()
+        
+        # 清理超過1分鐘的舊記錄
+        self.request_times = [t for t in self.request_times if current_time - t < 60]
+        
+        # 如果過去1分鐘內的請求數接近限制，則等待
+        if len(self.request_times) >= self.max_requests_per_minute:
+            wait_time = 60 - (current_time - self.request_times[0]) + 1
+            print(f"Rate limit approaching, waiting {wait_time:.1f} seconds...")
+            time.sleep(wait_time)
+            # 重新清理記錄
+            current_time = time.time()
+            self.request_times = [t for t in self.request_times if current_time - t < 60]
+        
+        # 計算動態延遲
+        delay = self.calculate_dynamic_delay()
+        
+        if delay > 0:
+            time.sleep(delay)
+        
+        # 記錄這次請求時間
+        self.request_times.append(time.time())
+    
+    def calculate_dynamic_delay(self):
+        """計算動態延遲時間"""
+        # 基礎延遲
+        delay = self.base_delay
+        
+        # 根據連續錯誤數增加延遲
+        if self.consecutive_errors > 0:
+            delay *= (self.error_backoff_multiplier ** min(self.consecutive_errors, 5))
+        
+        # 根據當前請求頻率調整延遲
+        current_time = time.time()
+        recent_requests = len([t for t in self.request_times if current_time - t < 10])
+        
+        if recent_requests > 20:  # 最近10秒內超過20個請求
+            delay *= 1.5
+        elif recent_requests > 15:  # 最近10秒內超過15個請求
+            delay *= 1.2
+        
+        # 添加隨機抖動避免同步請求
+        jitter = random.uniform(0.8, 1.2)
+        delay *= jitter
+        
+        return min(delay, self.max_delay)
+    
+    def on_error(self, error_msg):
+        """處理API錯誤"""
+        self.consecutive_errors += 1
+        
+        # 檢查是否是頻率限制錯誤
+        if "Too many requests" in error_msg or "rate limit" in error_msg.lower():
+            print(f"Rate limit detected! Consecutive errors: {self.consecutive_errors}")
+            # 對於頻率限制錯誤，等待更長時間
+            backoff_time = min(5.0 * (2 ** min(self.consecutive_errors - 1, 4)), 60.0)
+            print(f"Backing off for {backoff_time:.1f} seconds...")
+            time.sleep(backoff_time)
+        elif "APIError" in error_msg:
+            # 對於其他API錯誤，較短的等待時間
+            backoff_time = min(1.0 * self.consecutive_errors, 10.0)
+            print(f"API error detected, backing off for {backoff_time:.1f} seconds...")
+            time.sleep(backoff_time)
+    
+    def on_success(self):
+        """處理成功的請求"""
+        # 逐漸減少連續錯誤計數
+        if self.consecutive_errors > 0:
+            self.consecutive_errors = max(0, self.consecutive_errors - 1)
 
 
 def load_config(config_path="config.json"):
@@ -168,9 +257,12 @@ def calculate_rs_score(crypto_data, required_bars):
     return True, rs_score, ""
 
 
-def process_crypto(symbol, timeframe, days):
+def process_crypto(symbol, timeframe, days, rate_limiter):
     """Process a single cryptocurrency and calculate its RS score"""
     try:
+        # 使用智能頻率控制器
+        rate_limiter.wait_if_needed()
+        
         cd = CryptoDownloader()
         
         # Calculate required bars
@@ -202,15 +294,18 @@ def process_crypto(symbol, timeframe, days):
         if not success or data.empty:
             error_msg = "Failed to get data or empty dataset"
             print(f"{symbol} -> Error: {error_msg}")
+            rate_limiter.on_error(error_msg)
             return {"crypto": symbol, "status": "failed", "reason": error_msg}
         
         # Calculate RS score
         success, rs_score, error = calculate_rs_score(data, required_bars)
         if not success:
             print(f"{symbol} -> Error: {error}")
+            rate_limiter.on_error(error)
             return {"crypto": symbol, "status": "failed", "reason": error}
         
         print(f"{symbol} -> Successfully calculated RS Score: {rs_score}")
+        rate_limiter.on_success()
         return {
             "crypto": symbol,
             "status": "success",
@@ -220,6 +315,7 @@ def process_crypto(symbol, timeframe, days):
     except Exception as e:
         error_msg = str(e)
         print(f"{symbol} -> Error: {error_msg}")
+        rate_limiter.on_error(error_msg)
         return {"crypto": symbol, "status": "failed", "reason": error_msg}
 
 
@@ -236,28 +332,31 @@ if __name__ == '__main__':
     timeframe = args.timeframe
     days = args.days
     
-    # Initialize crypto downloader
+    # Initialize crypto downloader and rate limiter
     crypto_downloader = CryptoDownloader()
+    rate_limiter = RateLimiter(config)
     
     # Get list of all symbols
     all_cryptos = crypto_downloader.get_all_symbols()
     print(f"Total cryptos to process: {len(all_cryptos)}")
     
-    # Process all cryptos sequentially (single process to avoid API rate limits)
-    print("Using single process to avoid API rate limits")
+    # Process all cryptos sequentially with intelligent rate limiting
+    print("Using intelligent rate limiting to avoid API limits")
+    print(f"Base delay: {rate_limiter.base_delay}s, Max requests per minute: {rate_limiter.max_requests_per_minute}")
     results = []
     
     for i, crypto in enumerate(all_cryptos, 1):
         print(f"Processing {i}/{len(all_cryptos)}: {crypto}")
         try:
-            result = process_crypto(crypto, timeframe, days)
+            result = process_crypto(crypto, timeframe, days, rate_limiter)
             results.append(result)
+        except KeyboardInterrupt:
+            print("\nProcessing interrupted by user. Saving partial results...")
+            break
         except Exception as e:
             print(f"{crypto} -> Error: {str(e)}")
+            rate_limiter.on_error(str(e))
             results.append({"crypto": crypto, "status": "failed", "reason": str(e)})
-        
-        # Add a small delay between requests to be respectful to the API
-        time.sleep(0.1)
     
     # Process results
     failed_targets = []     # Failed to download data or error happened
