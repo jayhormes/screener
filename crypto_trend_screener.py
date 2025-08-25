@@ -855,7 +855,9 @@ def main():
                 ]
                 
                 # Process DTW calculations in parallel
-                with Pool(processes=min(cpu_count()-1, len(valid_symbols))) if len(valid_symbols) > 1 else Pool(processes=1) as pool:
+                # Ensure at least 1 process, but don't exceed available CPUs or symbol count
+                num_processes = max(1, min(cpu_count()-1, len(valid_symbols))) if len(valid_symbols) > 1 else 1
+                with Pool(processes=num_processes) as pool:
                     results = pool.map(process_symbol_dtw, process_args)
                 
                 # Process results
