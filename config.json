@@ -1,7 +1,7 @@
 {
     "discord": {
-        "webhook_url": "https://discord.com/api/webhooks/999920488887353455/-6TPJEd_pIdZkPJtAaztXn6vQSS-SU_EfegBMGz7nYJjiVpd5r2if6NfXmMq2tdjc7Wk",
-        "enabled": true
+        "webhook_url": "",
+        "enabled": false
     },
     "crypto_screener": {
         "default_timeframe": "15m",
