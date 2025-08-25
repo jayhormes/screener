@@ -42,6 +42,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.patches import ConnectionPatch
 from src.downloader import StockDownloader, CryptoDownloader
+from src.discord_notifier import DiscordNotifier
+from src.message_formatter import TrendSimilarityMessageFormatter
 from src.common import (
    TrendAnalysisConfig,
    DataNormalizer,
@@ -601,6 +603,69 @@ def visualize_sma_differences(query_df, window_df, diff_path, ref_symbol, target
     print(f"Saved SMA differences visualization to {filepath}")
 
 
+def cleanup_similarity_files(output_dir: str, detail_file: str, tv_file: str) -> bool:
+    """
+    Clean up similarity analysis files after successful Discord transmission
+    
+    Args:
+        output_dir: Output directory path
+        detail_file: Detail report file path
+        tv_file: TradingView file path
+        
+    Returns:
+        bool: True if cleanup was successful, False otherwise
+    """
+    success = True
+    deleted_count = 0
+    
+    try:
+        # Delete main files
+        files_to_delete = [detail_file, tv_file]
+        
+        for file_path in files_to_delete:
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    print(f"🗑️ Deleted: {os.path.basename(file_path)}")
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"❌ Failed to delete {os.path.basename(file_path)}: {e}")
+                    success = False
+        
+        # Clean up visualization directories
+        if os.path.exists(output_dir):
+            for item in os.listdir(output_dir):
+                item_path = os.path.join(output_dir, item)
+                if os.path.isdir(item_path) and item.startswith('vis_'):
+                    try:
+                        import shutil
+                        shutil.rmtree(item_path)
+                        print(f"🗂️ Removed visualization directory: {item}")
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"❌ Failed to remove directory {item}: {e}")
+                        success = False
+        
+        # Try to remove the output directory if it's empty
+        try:
+            if os.path.exists(output_dir):
+                remaining_items = os.listdir(output_dir)
+                if not remaining_items:
+                    os.rmdir(output_dir)
+                    print(f"🗂️ Removed empty output directory: {os.path.basename(output_dir)}")
+                    deleted_count += 1
+        except Exception as e:
+            print(f"⚠️ Could not remove output directory: {e}")
+        
+        print(f"📊 Cleanup completed: {deleted_count} items removed")
+        
+    except Exception as e:
+        print(f"❌ Error during cleanup: {e}")
+        success = False
+    
+    return success
+
+
 # ================ Main Function ================
 
 def main():
@@ -955,6 +1020,56 @@ def main():
                     f.write(symbols_str)
         
         print(f"TradingView format saved to: {tv_file}")
+        
+        # Send Discord notifications
+        try:
+            notifier = DiscordNotifier(use_trend_finder=True)
+            if notifier.enabled:
+                # Format summary message
+                summary_message = TrendSimilarityMessageFormatter.format_similarity_results_summary(
+                    summary_text, 
+                    total_timeframes=len(TIMEFRAMES_TO_ANALYZE),
+                    total_references=sum(len(trends) for trends in REFERENCE_TRENDS.values())
+                )
+                
+                # Format top matches message
+                top_matches_message = TrendSimilarityMessageFormatter.format_top_matches_by_timeframe(
+                    summary_text, 
+                    max_per_timeframe=5
+                )
+                
+                # Send summary message
+                print("Sending Discord notification...")
+                message_sent = notifier.send_message(summary_message)
+                
+                # Send top matches if summary was sent successfully
+                if message_sent:
+                    notifier.send_message(top_matches_message)
+                
+                # Send TradingView file
+                tv_message = f"📋 **TradingView Watchlist File**\nGenerated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                file_sent = notifier.send_file(tv_file, tv_message)
+                
+                if message_sent and file_sent:
+                    print("✅ Discord notifications sent successfully!")
+                    
+                    # Clean up local files after successful transmission
+                    print("🧹 Cleaning up local files...")
+                    cleanup_success = cleanup_similarity_files(output_dir, detail_file, tv_file)
+                    if cleanup_success:
+                        print("✅ Local files cleaned up successfully!")
+                    else:
+                        print("⚠️ Some files could not be cleaned up")
+                elif message_sent:
+                    print("⚠️ Discord message sent, but file upload failed")
+                    print("📁 Files preserved due to incomplete transmission")
+                else:
+                    print("❌ Failed to send Discord notifications")
+                    print("📁 Files preserved due to failed transmission")
+            else:
+                print("Discord notifications are disabled in config")
+        except Exception as e:
+            print(f"Error sending Discord notifications: {e}")
         
         # Calculate and output total runtime
         end_time = time.time()

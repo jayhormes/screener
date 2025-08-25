@@ -424,3 +424,121 @@ class TrendFinderMessageFormatter:
         message += f"**⏰ Completed:** {timestamp}"
         
         return message
+
+
+class TrendSimilarityMessageFormatter:
+    """
+    Utility class for formatting trend similarity analysis messages for Discord
+    """
+    
+    @staticmethod
+    def format_similarity_results_summary(results_text: str, 
+                                         total_timeframes: int = None,
+                                         total_references: int = None) -> str:
+        """
+        Format trend similarity analysis results summary for Discord (simplified)
+        """
+        message = "🔍 **Crypto Trend Similarity Analysis - Complete**\n\n"
+        
+        # Add timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message += f"📅 **Analysis Time:** {timestamp}\n\n"
+        
+        # Parse results to extract key information
+        lines = results_text.strip().split('\n')
+        timeframe_results = {}
+        current_timeframe = None
+        total_matches = 0
+        unique_symbols = set()
+        
+        for line in lines:
+            if 'TIMEFRAME:' in line:
+                timeframe = line.split('TIMEFRAME:')[1].strip()
+                current_timeframe = timeframe
+                timeframe_results[timeframe] = []
+            
+            elif '--- ' in line and 'Reference #' in line and current_timeframe:
+                ref_info = line.replace('---', '').strip()
+                timeframe_results[current_timeframe].append({'ref': ref_info, 'matches': []})
+            
+            elif 'Top Similarity Scores:' in line and current_timeframe:
+                continue
+            
+            elif ':' in line and 'Score=' in line and current_timeframe and not line.startswith('---'):
+                if timeframe_results[current_timeframe]:
+                    symbol = line.split(':')[0].strip()
+                    if symbol and symbol != 'Top Similarity Scores':
+                        timeframe_results[current_timeframe][-1]['matches'].append(line.strip())
+                        total_matches += 1
+                        unique_symbols.add(symbol)
+        
+        # Format summary by timeframe (simplified)
+        for timeframe, refs in timeframe_results.items():
+            timeframe_matches = sum(len(ref['matches']) for ref in refs)
+            if timeframe_matches > 0:
+                message += f"⏰ **{timeframe}:** {timeframe_matches} matches\n"
+        
+        message += f"\n🎯 **Total:** {total_matches} matches, {len(unique_symbols)} symbols\n"
+        
+        # Add top symbols preview
+        if unique_symbols:
+            top_symbols = sorted(list(unique_symbols))[:5]
+            symbols_preview = ', '.join(top_symbols)
+            if len(unique_symbols) > 5:
+                symbols_preview += f" +{len(unique_symbols) - 5} more"
+            message += f"💎 **Symbols:** {symbols_preview}"
+        
+        return message
+    
+    @staticmethod
+    def format_top_matches_by_timeframe(results_text: str, max_per_timeframe: int = 5) -> str:
+        """
+        Format top matches by timeframe for Discord (simplified)
+        """
+        message = "🔥 **Top Matches by Timeframe**\n\n"
+        
+        # Parse results
+        lines = results_text.strip().split('\n')
+        timeframe_matches = {}
+        current_timeframe = None
+        current_ref = None
+        
+        for line in lines:
+            if 'TIMEFRAME:' in line:
+                timeframe = line.split('TIMEFRAME:')[1].strip()
+                current_timeframe = timeframe
+                timeframe_matches[timeframe] = []
+            
+            elif '--- ' in line and 'Reference #' in line and current_timeframe:
+                current_ref = line.replace('---', '').strip()
+            
+            elif ':' in line and 'Score=' in line and current_timeframe and current_ref and not line.startswith('---'):
+                parts = line.split(':')
+                if len(parts) >= 2:
+                    symbol = parts[0].strip()
+                    if symbol and symbol != 'Top Similarity Scores':
+                        score_part = parts[1].split(',')[0].strip()
+                        if 'Score=' in score_part:
+                            score = float(score_part.split('Score=')[1])
+                            timeframe_matches[current_timeframe].append({
+                                'symbol': symbol,
+                                'score': score,
+                                'reference': current_ref,
+                                'full_line': line.strip()
+                            })
+        
+        # Sort and display top matches for each timeframe
+        for timeframe, matches in timeframe_matches.items():
+            if matches:
+                sorted_matches = sorted(matches, key=lambda x: x['score'], reverse=True)
+                top_matches = sorted_matches[:max_per_timeframe]
+                
+                message += f"⏰ **{timeframe}:**\n"
+                for i, match in enumerate(top_matches, 1):
+                    score = match['score']
+                    symbol = match['symbol']
+                    ref_name = match['reference'].split('(')[0].strip() if '(' in match['reference'] else match['reference']
+                    message += f"  {i}. **{symbol}** ({score:.4f}) - {ref_name}\n"
+                message += "\n"
+        
+        return message
