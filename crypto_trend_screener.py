@@ -99,6 +99,9 @@ OUTPUT_DIR = "similarity_output"
 # Timeframes to analyze
 TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
 
+# Discord notification settings
+SEND_NOTIFICATIONS_ONLY_AFTER_ALL_TIMEFRAMES = True  # Set to False to send after each timeframe
+
 # Top K symbols to record per reference trend
 TOP_K = 10
 
@@ -1023,55 +1026,75 @@ def main():
         
         print(f"TradingView format saved to: {tv_file}")
         
-        # Send Discord notifications
-        try:
-            notifier = DiscordNotifier(use_trend_finder=True)
-            if notifier.enabled:
-                # Format summary message
-                summary_message = TrendSimilarityMessageFormatter.format_similarity_results_summary(
-                    summary_text, 
-                    total_timeframes=len(TIMEFRAMES_TO_ANALYZE),
-                    total_references=sum(len(trends) for trends in REFERENCE_TRENDS.values())
-                )
-                
-                # Format top matches message
-                top_matches_message = TrendSimilarityMessageFormatter.format_top_matches_by_timeframe(
-                    summary_text, 
-                    max_per_timeframe=5
-                )
-                
-                # Send summary message
-                print("Sending Discord notification...")
-                message_sent = notifier.send_message(summary_message)
-                
-                # Send top matches if summary was sent successfully
-                if message_sent:
-                    notifier.send_message(top_matches_message)
-                
-                # Send TradingView file
-                tv_message = f"📋 **TradingView Watchlist File**\nGenerated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                file_sent = notifier.send_file(tv_file, tv_message)
-                
-                if message_sent and file_sent:
-                    print("✅ Discord notifications sent successfully!")
-                    
-                    # Clean up local files after successful transmission
-                    print("🧹 Cleaning up local files...")
-                    cleanup_success = cleanup_similarity_files(output_dir, detail_file, tv_file)
-                    if cleanup_success:
-                        print("✅ Local files cleaned up successfully!")
-                    else:
-                        print("⚠️ Some files could not be cleaned up")
-                elif message_sent:
-                    print("⚠️ Discord message sent, but file upload failed")
-                    print("📁 Files preserved due to incomplete transmission")
-                else:
-                    print("❌ Failed to send Discord notifications")
-                    print("📁 Files preserved due to failed transmission")
+        # Verify all timeframes have been processed before sending notifications
+        processed_timeframes = list(all_results.keys())
+        should_send_notifications = True
+        
+        if SEND_NOTIFICATIONS_ONLY_AFTER_ALL_TIMEFRAMES:
+            if len(processed_timeframes) != len(TIMEFRAMES_TO_ANALYZE):
+                print(f"⚠️ Warning: Only {len(processed_timeframes)}/{len(TIMEFRAMES_TO_ANALYZE)} timeframes processed")
+                print(f"Processed: {processed_timeframes}")
+                print(f"Expected: {TIMEFRAMES_TO_ANALYZE}")
+                print("Skipping Discord notifications until all timeframes are complete")
+                should_send_notifications = False
             else:
-                print("Discord notifications are disabled in config")
-        except Exception as e:
-            print(f"Error sending Discord notifications: {e}")
+                print(f"✅ All {len(TIMEFRAMES_TO_ANALYZE)} timeframes processed successfully")
+        else:
+            print(f"📤 Sending notifications for {len(processed_timeframes)} processed timeframes")
+
+        # Send Discord notifications only if conditions are met
+        if should_send_notifications:
+            try:
+                notifier = DiscordNotifier(use_trend_finder=True)
+                if notifier.enabled:
+                    # Format summary message
+                    summary_message = TrendSimilarityMessageFormatter.format_similarity_results_summary(
+                        summary_text, 
+                        total_timeframes=len(TIMEFRAMES_TO_ANALYZE),
+                        total_references=sum(len(trends) for trends in REFERENCE_TRENDS.values())
+                    )
+                    
+                    # Format top matches message
+                    top_matches_message = TrendSimilarityMessageFormatter.format_top_matches_by_timeframe(
+                        summary_text, 
+                        max_per_timeframe=5
+                    )
+                    
+                    # Send summary message
+                    print("Sending Discord notification...")
+                    message_sent = notifier.send_message(summary_message)
+                    
+                    # Send top matches if summary was sent successfully
+                    if message_sent:
+                        notifier.send_message(top_matches_message)
+                    
+                    # Send TradingView file
+                    tv_message = f"📋 **TradingView Watchlist File**\nGenerated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    file_sent = notifier.send_file(tv_file, tv_message)
+                    
+                    if message_sent and file_sent:
+                        print("✅ Discord notifications sent successfully!")
+                        
+                        # Clean up local files after successful transmission
+                        print("🧹 Cleaning up local files...")
+                        cleanup_success = cleanup_similarity_files(output_dir, detail_file, tv_file)
+                        if cleanup_success:
+                            print("✅ Local files cleaned up successfully!")
+                        else:
+                            print("⚠️ Some files could not be cleaned up")
+                    elif message_sent:
+                        print("⚠️ Discord message sent, but file upload failed")
+                        print("📁 Files preserved due to incomplete transmission")
+                    else:
+                        print("❌ Failed to send Discord notifications")
+                        print("📁 Files preserved due to failed transmission")
+                else:
+                    print("Discord notifications are disabled in config")
+            except Exception as e:
+                print(f"Error sending Discord notifications: {e}")
+        else:
+            print("⏸️ Discord notifications skipped (waiting for all timeframes to complete)")
+        
         
         # Calculate and output total runtime
         end_time = time.time()
