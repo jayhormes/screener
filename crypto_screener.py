@@ -403,8 +403,9 @@ if __name__ == '__main__':
         top_20_targets = targets[:20]
         txt_content += ",".join([f"BINANCE:{crypto}.P" for crypto in top_20_targets])
     
-    # Create output/<date> directory structure
-    base_folder = "output"
+    # Create output/<date> directory structure (relative to script directory)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    base_folder = os.path.join(script_dir, "output")
     date_folder = os.path.join(base_folder, date_str)
     os.makedirs(date_folder, exist_ok=True)
     
@@ -494,6 +495,8 @@ if __name__ == '__main__':
     cleanup_days = config.get("discord", {}).get("cleanup_old_folders_days", 7)
     if cleanup_days > 0:
         print(f"\nCleaning up folders older than {cleanup_days} days...")
-        cleanup_old_folders("output", cleanup_days)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        output_folder = os.path.join(script_dir, "output")
+        cleanup_old_folders(output_folder, cleanup_days)
     
     # print(f"Failed cryptos saved to {failed_path}")

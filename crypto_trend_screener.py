@@ -92,9 +92,9 @@ REFERENCE_TRENDS = {
 # Timezone for datetime conversion
 TIMEZONE = "America/Los_Angeles"
 
-# Output directory path
-
-OUTPUT_DIR = "similarity_output"
+# Output directory path (relative to script directory)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(script_dir, "similarity_output")
 
 # Timeframes to analyze
 TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]

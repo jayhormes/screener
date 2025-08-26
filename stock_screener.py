@@ -290,8 +290,9 @@ if __name__ == '__main__':
     output_targets = strong_targets if args.all else strong_targets[:980]
     txt_content += ",".join(output_targets)
 
-    # Create output/<date> directory structure
-    base_folder = "output"
+    # Create output/<date> directory structure (relative to script directory)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    base_folder = os.path.join(script_dir, "output")
     date_folder = os.path.join(base_folder, date_str)
     os.makedirs(date_folder, exist_ok=True)
     
