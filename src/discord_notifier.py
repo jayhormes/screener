@@ -48,6 +48,7 @@ class DiscordNotifier:
                     else:
                         # Use regular config
                         discord_config = config.get('discord', {})
+                        self.delete_files_after_upload = discord_config.get('delete_files_after_upload', True)
                     
                     self.webhook_url = discord_config.get('webhook_url', '')
                     self.enabled = discord_config.get('enabled', False)
