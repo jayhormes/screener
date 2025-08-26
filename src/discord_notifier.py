@@ -34,8 +34,14 @@ class DiscordNotifier:
     def _load_config(self):
         """Load Discord configuration from config.json"""
         try:
-            if os.path.exists(self.config_path):
-                with open(self.config_path, 'r', encoding='utf-8') as f:
+            config_path = self.config_path
+            # If config_path is just a filename (no directory), look in parent directory of this script
+            if not os.path.dirname(config_path):
+                script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                config_path = os.path.join(script_dir, config_path)
+                
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
                     
                     if self.use_trend_finder:
@@ -53,7 +59,7 @@ class DiscordNotifier:
                     self.webhook_url = discord_config.get('webhook_url', '')
                     self.enabled = discord_config.get('enabled', False)
             else:
-                print(f"Config file {self.config_path} not found")
+                print(f"Config file {config_path} not found")
         except Exception as e:
             print(f"Error loading config: {e}")
     

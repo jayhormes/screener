@@ -101,6 +101,11 @@ class RateLimiter:
 def load_config(config_path="config.json"):
     """Load configuration from config.json"""
     try:
+        # If config_path is just a filename (no directory), look in script directory
+        if not os.path.dirname(config_path):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(script_dir, config_path)
+            
         if os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
