@@ -538,7 +538,7 @@ class TrendSimilarityMessageFormatter:
                     score = match['score']
                     symbol = match['symbol']
                     ref_name = match['reference'].split('(')[0].strip() if '(' in match['reference'] else match['reference']
-                    message += f"  {i}. **{symbol}** ({score:.4f}) - {ref_name}\n"
+                    message += f"{i}. **{symbol}** ({score:.4f}) - {ref_name}\n"
                 message += "\n"
         
         return message
