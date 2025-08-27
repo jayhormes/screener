@@ -1,13 +1,13 @@
 {
     "discord": {
-        "webhook_url": "https://discord.com/api/webhooks/999920488887353455/-6TPJEd_pIdZkPJtAaztXn6vQSS-SU_EfegBMGz7nYJjiVpd5r2if6NfXmMq2tdjc7Wk",
-        "enabled": true,
+        "webhook_url": "",
+        "enabled": false,
         "delete_files_after_upload": true,
         "cleanup_old_folders_days": 7
     },
     "discord_trend_finder": {
-        "webhook_url": "https://discord.com/api/webhooks/1409451726460686376/hVl3-v598vxNAE6m4YHg8g1Rc2WjxA5NGheNp9DFmrOUXPXOdCMcCSBtLgtmAV2Ooc-B",
-        "enabled": true,
+        "webhook_url": "",
+        "enabled": false,
         "send_detailed_results": true,
         "send_overall_summary": true,
         "max_results_per_message": 10,
@@ -16,6 +16,7 @@
     "crypto_screener": {
         "default_timeframe": "15m",
         "default_days": 3,
+        "default_top_n": 20,
         "rate_limiter": {
             "base_delay": 0.25,
             "max_delay": 10.0,

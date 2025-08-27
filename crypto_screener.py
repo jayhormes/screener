@@ -333,9 +333,12 @@ if __name__ == '__main__':
                        default=config.get('crypto_screener', {}).get('default_timeframe', '15m'))
     parser.add_argument('-d', '--days', type=int, help='Calculation duration in days (default 3 days)', 
                        default=config.get('crypto_screener', {}).get('default_days', 3))
+    parser.add_argument('-n', '--top-n', type=int, help='Number of top targets to display and save (default 20)', 
+                       default=config.get('crypto_screener', {}).get('default_top_n', 20))
     args = parser.parse_args()
     timeframe = args.timeframe
     days = args.days
+    top_n = args.top_n
     
     # Initialize crypto downloader and rate limiter
     crypto_downloader = CryptoDownloader()
@@ -383,8 +386,8 @@ if __name__ == '__main__':
     print(f"Failed cryptos: {len(failed_targets)}")
     print(f"Successfully calculated: {len(targets)}")
     
-    print("\n=========================== Target : Score (TOP 20) ===========================")
-    for idx, crypto in enumerate(targets[:20], 1):
+    print(f"\n=========================== Target : Score (TOP {top_n}) ===========================")
+    for idx, crypto in enumerate(targets[:top_n], 1):
         score = target_score[crypto]
         # Remove USDT suffix if present, keep other suffixes like USDC
         display_symbol = crypto
@@ -398,10 +401,10 @@ if __name__ == '__main__':
     date_str = datetime.now().strftime("%Y-%m-%d")
     txt_content = "###Targets (Sort by score)\n"
     
-    # Add only TOP 20 targets
+    # Add only top N targets
     if targets:
-        top_20_targets = targets[:20]
-        txt_content += ",".join([f"BINANCE:{crypto}.P" for crypto in top_20_targets])
+        top_targets = targets[:top_n]
+        txt_content += ",".join([f"BINANCE:{crypto}.P" for crypto in top_targets])
     
     # Create output/<date> directory structure (relative to script directory)
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -438,7 +441,7 @@ if __name__ == '__main__':
             total_processed=len(all_cryptos),
             failed_count=len(failed_targets),
             timestamp=full_date_str,
-            max_targets=20
+            max_targets=top_n
         )
         
         # Format file message
