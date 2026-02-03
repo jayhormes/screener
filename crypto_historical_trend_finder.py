@@ -64,6 +64,14 @@ from src.common import (
 REFERENCE_TRENDS = {
    "AVAX": [
        [datetime(2023, 11, 9, 12, 0), datetime(2023, 11, 14, 18, 0), "1h", "standard"],
+       [datetime(2023, 11, 10, 22, 0), datetime(2023, 11, 15, 1, 0), "1h", "standard_modify"],
+   ]
+}
+
+'''
+REFERENCE_TRENDS = {
+   "AVAX": [
+       [datetime(2023, 11, 9, 12, 0), datetime(2023, 11, 14, 18, 0), "1h", "standard"],
    ],
    "MKR": [
        [datetime(2023, 6, 24, 9, 0), datetime(2023, 7, 18, 5, 0), "4h", "standard"],
@@ -86,6 +94,7 @@ REFERENCE_TRENDS = {
        [datetime(2025, 5, 8, 0, 0), datetime(2025, 5, 11, 1, 0), "1h", "standard"]
    ],
 }
+'''
 
 # Historical starting point (used only if no cached data exists)
 HISTORICAL_START_DATE = datetime(2021, 1, 1)
@@ -94,7 +103,8 @@ HISTORICAL_START_DATE = datetime(2021, 1, 1)
 TIMEZONE = "America/Los_Angeles"
 
 # Timeframes to analyze
-TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
+#TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
+TIMEFRAMES_TO_ANALYZE = ["30m"]
 
 # Main output directory
 OUTPUT_DIR = "historical_trend_finder_reports"
@@ -381,6 +391,67 @@ class DTWSimilarityFinder:
 
 # ================ Analysis Functions ================
 
+def has_unnatural_volume(window_df: pd.DataFrame) -> bool:
+    """Check for Unnatural Volume (突兀量) at the end of a matched pattern"""
+    if window_df is None or len(window_df) < 2:
+        return False
+    required_cols = {'Volume', 'Open', 'Close'}
+    if not required_cols.issubset(window_df.columns):
+        return False
+    last = window_df.iloc[-1]
+    prev = window_df.iloc[-2]
+    try:
+        volume_condition = last['Volume'] >= 5 * prev['Volume']
+        bullish_condition = last['Close'] > last['Open']
+        return bool(volume_condition and bullish_condition)
+    except Exception:
+        return False
+
+
+def determine_position_stage(window_df: pd.DataFrame) -> int:
+    """
+    Determine the position stage (位階) based on SMA and Price relationships.
+    Stage 0: Retracement touching SMA30.
+    Stage 1: Breaking and staying steady above SMA30, 45, 60.
+    Stage 2: Breaking and staying steady above previous pattern high.
+    Returns: stage (0, 1, 2) or -1 if not applicable.
+    """
+    if window_df is None or len(window_df) < 3:
+        return -1
+        
+    required_cols = {'Close', 'High', 'SMA_30', 'SMA_45', 'SMA_60'}
+    if not required_cols.issubset(window_df.columns):
+        return -1
+        
+    last_close = window_df['Close'].iloc[-1]
+    last_sma30 = window_df['SMA_30'].iloc[-1]
+    last_sma45 = window_df['SMA_45'].iloc[-1]
+    last_sma60 = window_df['SMA_60'].iloc[-1]
+    
+    # Check if "Steady" (站穩): 3 consecutive candles > SMA30 OR SMA30 slope > 0
+    recent_closes = window_df['Close'].iloc[-3:]
+    recent_sma30s = window_df['SMA_30'].iloc[-3:]
+    stayed_steady = (recent_closes > recent_sma30s).all() or (window_df['SMA_30'].iloc[-1] > window_df['SMA_30'].iloc[-2])
+    
+    # Stage 2: Break previous high and stay steady
+    # Previous high of the pattern (excluding the last few bars to check for the break)
+    prev_high = window_df['High'].iloc[:-5].max() if len(window_df) > 10 else window_df['High'].max()
+    if last_close > prev_high and stayed_steady:
+        return 2
+        
+    # Stage 1: Above all SMAs and stay steady
+    if last_close > last_sma30 and last_close > last_sma45 and last_close > last_sma60 and stayed_steady:
+        return 1
+        
+    # Stage 0: Touch SMA30 (within a small threshold)
+    # Check if price low or close is near/touching SMA30
+    last_low = window_df['Low'].iloc[-1]
+    if last_low <= last_sma30 <= window_df['High'].iloc[-1]:
+        return 0
+        
+    return -1
+
+
 def analyze_future_trend(pattern_df: pd.DataFrame, target_df: pd.DataFrame, 
                        extension_factors: list = None) -> dict:
     """Analyze future trend for different extension factors"""
@@ -441,129 +512,121 @@ def analyze_future_trend(pattern_df: pd.DataFrame, target_df: pd.DataFrame,
     return results
 
 
+
 def calculate_trend_statistics(results: list, data_dict: dict, extension_factors: list = None) -> dict:
-    """Calculate trend statistics for a list of results"""
+    """Calculate trend statistics for a list of results with Stages and Volume"""
     if extension_factors is None:
-        extension_factors = EXTENSION_FACTORS_FOR_STATS
+        extension_factors = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.5]
+    
+    def init_stats():
+        return {
+            'total': 0,
+            'default': {'rise': 0, 'fall': 0, 'insufficient_data': 0, 'no_future_data': 0},
+            'extension': {factor: {'rise': 0, 'fall': 0, 'insufficient_data': 0, 'no_future_data': 0} for factor in extension_factors}
+        }
+
+    overall_stats = init_stats()
+    unnatural_stats = init_stats()
+    stage_stats = {s: init_stats() for s in [0, 1, 2]}
+    unnatural_stage_stats = {s: init_stats() for s in [0, 1, 2]}
     
     if not results:
         return {
-            'total_results': 0,
-            'default_factor_stats': {'rise': 0, 'fall': 0, 'insufficient_data': 0, 'no_future_data': 0},
-            'extension_factor_stats': {factor: {'rise': 0, 'fall': 0, 'insufficient_data': 0, 'no_future_data': 0} for factor in extension_factors}
+            'overall': overall_stats, 'unnatural': unnatural_stats,
+            'stages': stage_stats, 'unnatural_stages': unnatural_stage_stats,
+            'total_results': 0
         }
-    
-    # Statistics for default extension factor
-    default_stats = {'rise': 0, 'fall': 0, 'insufficient_data': 0, 'no_future_data': 0}
-    
-    # Statistics for different extension factors
-    extension_stats = {factor: {'rise': 0, 'fall': 0, 'insufficient_data': 0, 'no_future_data': 0} for factor in extension_factors}
-    
+
+    # Import required constants from the module scope
+    import __main__
+    vis_factor = getattr(__main__, 'VIS_EXTENSION_FUTURE_LENGTH_FACTOR', 2.0)
+
     for result in results:
-        if result['window_data'] is None:
-            continue
-            
+        if result.get('window_data') is None: continue
         symbol = result['symbol']
         target_df = data_dict.get(symbol)
+        if target_df is None: continue
         
-        if target_df is None:
-            continue
+        is_unnatural = result.get('has_unnatural_volume', False)
+        stage = result.get('position_stage', -1)
         
-        # Analyze trend for default extension factor (use VIS_EXTENSION_FUTURE_LENGTH_FACTOR)
         pattern_df = result['window_data']
-        default_trend = analyze_future_trend(pattern_df, target_df, [VIS_EXTENSION_FUTURE_LENGTH_FACTOR])
-        
-        if VIS_EXTENSION_FUTURE_LENGTH_FACTOR in default_trend:
-            trend_info = default_trend[VIS_EXTENSION_FUTURE_LENGTH_FACTOR]
-            trend_result = trend_info['trend']
+        # Dynamically find analyze_future_trend if not in local scope
+        analyze_fn = globals().get('analyze_future_trend')
+        if not analyze_fn:
+            import __main__
+            analyze_fn = __main__.analyze_future_trend
             
-            if trend_result in ['rise', 'fall']:
-                if trend_info.get('insufficient_data', False):
-                    default_stats['insufficient_data'] += 1
-                else:
-                    default_stats[trend_result] += 1
-            elif trend_result == 'no_future_data':
-                default_stats['no_future_data'] += 1
-            else:
-                default_stats['no_future_data'] += 1  # Other unknown cases categorized as no_future_data
+        all_trends = analyze_fn(pattern_df, target_df, extension_factors + [vis_factor])
         
-        # Analyze trend for all extension factors
-        all_trends = analyze_future_trend(pattern_df, target_df, extension_factors)
-        
-        for factor in extension_factors:
-            if factor in all_trends:
-                trend_info = all_trends[factor]
-                trend_result = trend_info['trend']
-                
-                if trend_result in ['rise', 'fall']:
-                    if trend_info.get('insufficient_data', False):
-                        extension_stats[factor]['insufficient_data'] += 1
-                    else:
-                        extension_stats[factor][trend_result] += 1
-                elif trend_result == 'no_future_data':
-                    extension_stats[factor]['no_future_data'] += 1
-                else:
-                    extension_stats[factor]['no_future_data'] += 1  # Other unknown cases
+        def update_stats(stats_obj):
+            stats_obj['total'] += 1
+            if vis_factor in all_trends:
+                t_res = all_trends[vis_factor]['trend']
+                if t_res in stats_obj['default']: stats_obj['default'][t_res] += 1
+            for factor in extension_factors:
+                if factor in all_trends:
+                    t_res = all_trends[factor]['trend']
+                    if t_res in stats_obj['extension'][factor]: stats_obj['extension'][factor][t_res] += 1
+
+        update_stats(overall_stats)
+        if is_unnatural: update_stats(unnatural_stats)
+        if stage in stage_stats: update_stats(stage_stats[stage])
+        if is_unnatural and stage in unnatural_stage_stats: update_stats(unnatural_stage_stats[stage])
     
     return {
         'total_results': len(results),
-        'default_factor_stats': default_stats,
-        'extension_factor_stats': extension_stats
+        'overall': overall_stats,
+        'unnatural': unnatural_stats,
+        'stages': stage_stats,
+        'unnatural_stages': unnatural_stage_stats,
+        'default_factor_stats': overall_stats['default'],
+        'extension_factor_stats': overall_stats['extension'],
+        'unnatural_volume_total': unnatural_stats['total'],
+        'unnatural_volume_default_stats': unnatural_stats['default'],
+        'unnatural_volume_extension_stats': unnatural_stats['extension']
     }
 
 
 def format_trend_statistics(stats: dict, factor_name: str = "Default") -> list:
-    """Format trend statistics into readable text"""
+    """Format trend statistics into readable text with Stages and Unnatural Volume"""
     lines = []
-    total = stats['total_results']
-    
+    total = stats.get('total_results', 0)
     if total == 0:
         lines.append(f"{factor_name}: No results available")
         return lines
     
-    # Default factor statistics
-    default_stats = stats['default_factor_stats']
-    rise_count = default_stats['rise']
-    fall_count = default_stats['fall']
-    insufficient_data_count = default_stats.get('insufficient_data', 0)
-    no_future_data_count = default_stats.get('no_future_data', 0)
-    
-    rise_percentage = (rise_count / total) * 100 if total > 0 else 0
-    fall_percentage = (fall_count / total) * 100 if total > 0 else 0
-    insufficient_percentage = (insufficient_data_count / total) * 100 if total > 0 else 0
-    no_future_percentage = (no_future_data_count / total) * 100 if total > 0 else 0
-    
-    lines.append(f"{factor_name} Extension Factor ({VIS_EXTENSION_FUTURE_LENGTH_FACTOR}x):")
-    lines.append(f"  Rise: {rise_count}/{total} ({rise_percentage:.1f}%)")
-    lines.append(f"  Fall: {fall_count}/{total} ({fall_percentage:.1f}%)")
-    if insufficient_data_count > 0:
-        lines.append(f"  Insufficient Future Data: {insufficient_data_count}/{total} ({insufficient_percentage:.1f}%)")
-    if no_future_data_count > 0:
-        lines.append(f"  No Future Data: {no_future_data_count}/{total} ({no_future_percentage:.1f}%)")
-    
-    # Extension factor statistics
-    extension_stats = stats['extension_factor_stats']
-    lines.append(f"\nExtension Factor Analysis:")
-    
-    for factor in sorted(extension_stats.keys()):
-        factor_stats = extension_stats[factor]
-        rise_count = factor_stats['rise']
-        fall_count = factor_stats['fall']
-        insufficient_count = factor_stats.get('insufficient_data', 0)
-        no_future_count = factor_stats.get('no_future_data', 0)
-        
-        rise_percentage = (rise_count / total) * 100 if total > 0 else 0
-        fall_percentage = (fall_count / total) * 100 if total > 0 else 0
-        insufficient_percentage = (insufficient_count / total) * 100 if total > 0 else 0
-        no_future_percentage = (no_future_count / total) * 100 if total > 0 else 0
-        
-        line = f"  {factor}x: Rise {rise_count}({rise_percentage:.1f}%) | Fall {fall_count}({fall_percentage:.1f}%)"
-        if insufficient_count > 0:
-            line += f" | Insufficient {insufficient_count}({insufficient_percentage:.1f}%)"
-        if no_future_count > 0:
-            line += f" | No Future {no_future_count}({no_future_percentage:.1f}%)"
-        lines.append(line)
-    
+    import __main__
+    vis_factor = getattr(__main__, 'VIS_EXTENSION_FUTURE_LENGTH_FACTOR', 2.0)
+
+    def format_group(group_stats, label):
+        g_total = group_stats['total']
+        if g_total == 0: return [f"\n{label}: No matches found"]
+        d_rise = group_stats['default']['rise']
+        d_fall = group_stats['default']['fall']
+        d_rise_pct = (d_rise / g_total) * 100 if g_total > 0 else 0
+        d_fall_pct = (d_fall / g_total) * 100 if g_total > 0 else 0
+        group_lines = [
+            f"\n{label} (Total: {g_total}):",
+            f"  Default ({vis_factor}x): Rise {d_rise}/{g_total} ({d_rise_pct:.1f}%) | Fall {d_fall}/{g_total} ({d_fall_pct:.1f}%)"
+        ]
+        ext_line = "  Extension Factors (Rise %): "
+        ext_parts = []
+        for factor in sorted(group_stats['extension'].keys()):
+            e_rise = group_stats['extension'][factor]['rise']
+            e_pct = (e_rise / g_total) * 100 if g_total > 0 else 0
+            ext_parts.append(f"{factor}x: {e_pct:.1f}%")
+        group_lines.append(ext_line + " | ".join(ext_parts))
+        return group_lines
+
+    lines.extend(format_group(stats['overall'], "OVERALL STATISTICS"))
+    lines.extend(format_group(stats['unnatural'], "UNNATURAL VOLUME (突兀量) ONLY"))
+    lines.append("\n" + "="*20 + " STAGE ANALYSIS " + "="*20)
+    for s in [0, 1, 2]:
+        lines.extend(format_group(stats.get('stages', {}).get(s, {'total':0}), f"STAGE {s}"))
+    lines.append("\n" + "="*20 + " STAGE +突兀量 ANALYSIS " + "="*20)
+    for s in [0, 1, 2]:
+        lines.extend(format_group(stats.get('unnatural_stages', {}).get(s, {'total':0}), f"STAGE {s} + UNNATURAL VOLUME"))
     return lines
 
 
@@ -955,6 +1018,8 @@ def main():
                     # Add symbol information to the result
                     final_result = result["result"].copy()
                     final_result["symbol"] = symbol
+                    final_result["has_unnatural_volume"] = has_unnatural_volume(final_result.get("window_data"))
+                    final_result["position_stage"] = determine_position_stage(final_result.get("window_data"))
                     all_symbol_results.append(final_result)
             
             print(f"Found {len(all_symbol_results)} valid results before filtering...")

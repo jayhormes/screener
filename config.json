@@ -24,7 +24,7 @@
         }
     },
     "trend_finder": {
-        "save_images": false,
+        "save_images": true,
         "image_format": "png",
         "image_dpi": 150
     }
