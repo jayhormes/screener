@@ -560,18 +560,7 @@ class DataCacheManager:
     @staticmethod
     def download_timeframe_data(timeframe: str, output_dir: str, config: TrendAnalysisConfig, 
                                 historical_start_date: datetime, data_processor) -> dict:
-        """Download and cache data for all symbols of a specific timeframe"""
-        # Check for cached data
-        cache_file = DataCacheManager.get_timeframe_cache_path(output_dir, timeframe)
-        
-        if os.path.exists(cache_file):
-            print(f"Loading cached data for timeframe {timeframe}...")
-            data_dict = FileManager.load_from_cache(cache_file)
-            if data_dict is not None:
-                print(f"Loaded cached data for {len(data_dict)} symbols in timeframe {timeframe}")
-                return data_dict
-        
-        print(f"No cached data found for timeframe {timeframe}, downloading...")
+        """Download data for all symbols of a specific timeframe using individual caches"""
         
         # Get all available symbols
         all_symbols = data_processor.downloader.get_all_symbols()
@@ -584,37 +573,47 @@ class DataCacheManager:
         # Get current time as end timestamp
         end_timestamp = int(time.time())
         
-        # Download data for all symbols
+        # Download/Load data for all symbols
         data_dict = {}
         
-        print(f"Downloading data for timeframe {timeframe} from {historical_start_date} to now...")
+        from datetime import datetime as dt
+        print(f"[{dt.now().strftime('%H:%M:%S')}] Processing data for timeframe {timeframe} from {historical_start_date} to now...")
         
         for symbol in symbols:
-            print(f"Downloading data for {symbol} ({timeframe})...")
-            
-            # Get data
-            df = data_processor.get_data(
+            # Get data (downloader will handle individual pkl cache)
+            start_fetch_time = time.time()
+            result = data_processor.get_data(
                 symbol,
                 timeframe,
                 start_timestamp,
                 end_timestamp
             )
+            fetch_duration = time.time() - start_fetch_time
             
-            if not df.empty:
-                data_dict[symbol] = df
-                print(f"Downloaded {len(df)} data points for {symbol} ({timeframe})")
+            # Handle both 2-tuple (df, fetched) and 3-tuple (success, df, fetched) returns
+            if len(result) == 3:
+                success, df, fetched_from_network = result
             else:
-                print(f"Failed to download data for {symbol} ({timeframe})")
-                data_dict[symbol] = None
+                df, fetched_from_network = result
+                success = not df.empty
             
-            # Sleep to avoid API rate limits
-            time.sleep(config.api_sleep_seconds)
+            if success and not df.empty:
+                data_dict[symbol] = df
+                # Only log and sleep if we actually went to the network
+                if fetched_from_network:
+                    # Adaptive sleep: scale based on fetch duration
+                    # Short fetch = few API calls = short sleep
+                    # Long fetch = many API calls = longer sleep
+                    adaptive_sleep = min(config.api_sleep_seconds, max(1.0, fetch_duration * 2.5))
+                    print(f"[{dt.now().strftime('%H:%M:%S')}] Synced {symbol} ({timeframe}), {len(df)} pts, fetch={fetch_duration:.1f}s, sleep={adaptive_sleep:.1f}s")
+                    time.sleep(adaptive_sleep)
+                # Optional: Log cache hits every 100 symbols to show progress
+                elif len(data_dict) % 100 == 0:
+                    print(f"[{dt.now().strftime('%H:%M:%S')}] Progress: {len(data_dict)}/{len(symbols)} symbols processed (cache)...")
+            else:
+                data_dict[symbol] = None
         
-        # Save to cache
-        FileManager.save_to_cache(data_dict, cache_file)
-        
-        print(f"Saved data for timeframe {timeframe} to cache")
-        
+        print(f"[{dt.now().strftime('%H:%M:%S')}] Completed processing {len(data_dict)} symbols for {timeframe}")
         return data_dict
 
 

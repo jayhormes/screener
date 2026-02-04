@@ -63,8 +63,9 @@ from src.common import (
 # Reference trends definition
 REFERENCE_TRENDS = {
    "AVAX": [
-       [datetime(2023, 11, 9, 12, 0), datetime(2023, 11, 14, 18, 0), "1h", "standard"],
-       [datetime(2023, 11, 10, 22, 0), datetime(2023, 11, 15, 1, 0), "1h", "standard_modify"],
+       [datetime(2023, 11, 10, 22, 0), datetime(2023, 11, 14, 8, 0), "1h", "stage_0"],
+#       [datetime(2023, 11, 10, 22, 0), datetime(2023, 11, 15, 2, 0), "1h", "stage_1"],
+#       [datetime(2023, 11, 10, 22, 0), datetime(2023, 11, 15, 15, 0), "1h", "stage_2"],
    ]
 }
 
@@ -164,7 +165,7 @@ class DataProcessor(BaseDataProcessor):
         self.config = config or TrendAnalysisConfig()
 
     def get_data(self, symbol: str, timeframe: str, start_ts: int, end_ts: int, 
-                include_buffer: bool = True, is_reference: bool = False) -> pd.DataFrame:
+                include_buffer: bool = True, is_reference: bool = False) -> tuple[pd.DataFrame, bool]:
         """Get data with buffer period for SMA calculation"""
         if include_buffer:
             # Calculate buffer period for SMA calculation
@@ -180,7 +181,7 @@ class DataProcessor(BaseDataProcessor):
             symbol_full = symbol
             
         # Set validate=False for reference trends, otherwise use default (True)
-        success, df = self.downloader.get_data(
+        success, df, fetched_from_network = self.downloader.get_data(
             symbol_full,
             buffer_start_ts,
             end_ts,
@@ -190,7 +191,7 @@ class DataProcessor(BaseDataProcessor):
 
         if not success or df is None or df.empty:
             print(f"Failed to get data for {symbol} ({timeframe})")
-            return pd.DataFrame()
+            return pd.DataFrame(), False
 
         # Filter to requested time range
         start_time = pd.Timestamp.fromtimestamp(start_ts)
@@ -202,7 +203,7 @@ class DataProcessor(BaseDataProcessor):
         # Filter to requested time range after preparation
         df = df[(df.index >= start_time) & (df.index <= end_time)]
 
-        return df
+        return df, fetched_from_network
 
 
 # ================ DTW Similarity Calculator ================

@@ -152,7 +152,7 @@ class DataProcessor(BaseDataProcessor):
 
     def get_data(self, symbol: str, timeframe: str, start_ts: int, end_ts: int,
                 is_crypto: bool = True, include_buffer: bool = True, 
-                is_reference: bool = False) -> pd.DataFrame:
+                is_reference: bool = False) -> tuple[pd.DataFrame, bool]:
         """Get data with buffer period for SMA calculation"""
         if include_buffer:
             # Calculate buffer period for SMA calculation
@@ -173,7 +173,7 @@ class DataProcessor(BaseDataProcessor):
                 symbol_full = symbol
                 
             # Set validate=False for reference trends, otherwise use default (True)
-            success, df = self.downloader.get_data(
+            success, df, fetched_from_network = self.downloader.get_data(
                 symbol_full,
                 buffer_start_ts,
                 end_ts,
@@ -181,7 +181,7 @@ class DataProcessor(BaseDataProcessor):
                 timeframe=timeframe
             )
         else:  # stock
-            success, df = self.downloader.get_data(
+            success, df, fetched_from_network = self.downloader.get_data(
                 symbol,
                 buffer_start_ts,
                 end_ts,
@@ -191,7 +191,7 @@ class DataProcessor(BaseDataProcessor):
 
         if not success or df is None or df.empty:
             print(f"Failed to get data for {symbol} ({timeframe})")
-            return pd.DataFrame()
+            return pd.DataFrame(), False
 
         # Filter to requested time range
         start_time = pd.Timestamp.fromtimestamp(start_ts)
@@ -203,7 +203,7 @@ class DataProcessor(BaseDataProcessor):
         # Filter to requested time range after preparation
         df = df[(df.index >= start_time) & (df.index <= end_time)]
 
-        return df
+        return df, fetched_from_network
 
 
 # ================ DTW Similarity Calculator ================
@@ -811,20 +811,23 @@ def main():
                 print(f"Getting data for {symbol} [{timeframe}]...")
                 
                 # Get data for this symbol
-                df = data_processor.get_data(
+                start_fetch_time = time.time()
+                df, fetched_from_network = data_processor.get_data(
                     symbol,
                     timeframe,
                     start_ts,
                     end_ts,
                     is_crypto=True
                 )
+                fetch_duration = time.time() - start_fetch_time
                 
                 if not df.empty and len(df) > 0:
                     print(f"  Got data from {df.index[0]} to {df.index[-1]}, {len(df)} points")
                     target_data[symbol] = df
                 
-                # Sleep to avoid triggering API rate limits
-                time.sleep(api_sleep_seconds)
+                # Sleep to avoid triggering API rate limits ONLY if we actually fetched from API
+                if fetched_from_network:
+                    time.sleep(api_sleep_seconds)
             
             print(f"Successfully retrieved data for {len(target_data)} out of {len(target_symbols)} symbols")
         else:

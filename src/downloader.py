@@ -2,6 +2,7 @@ import json
 import re
 import os
 import time
+import pickle
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -118,131 +119,135 @@ class StockDownloader:
 
         return True
 
-    def get_data(self, ticker: str, start_ts: int, end_ts: int = None, timeframe: str = "1d", dropna=True, atr=True, validate=True) -> tuple[bool, pd.DataFrame]:
+    def get_data(self, ticker: str, start_ts: int, end_ts: int = None, timeframe: str = "1d", dropna=True, atr=True, validate=True) -> tuple[bool, pd.DataFrame, bool]:
         """
         Get stock data with SMA calculation and data quality validation
-        Args:
-            ticker: Stock symbol
-            start_ts: Start timestamp
-            end_ts: End timestamp (default: current time)
-            timeframe: Time interval ("1d" or "1h")
-            dropna: Whether to drop NA values
-            atr: Whether to calculate ATR (default: True)
         Returns:
-            (success, DataFrame)
+            (success, DataFrame, fetched_from_network)
         """
-        # Calculate extended start for SMA calculation
-        max_sma = max(STOCK_SMA)
-        fc = 1.3 if timeframe == "1d" else 0.6
-        extension = np.int64(max_sma * 24 * 3600 * fc)
-        extended_start = np.int64(start_ts - extension)
+        try:
+            # Setup timeframe mapping
+            if timeframe == "1d":
+                multiplier = 1
+                timespan = "day"
+            elif timeframe == "hour":
+                multiplier = 1
+                timespan = "hour"
+            elif timeframe == "minute":
+                multiplier = 1
+                timespan = "minute"
+            else:
+                raise ValueError("Unsupported stock timeframe")
 
-        # Get current time if end_ts not provided
-        if end_ts is None:
-            end_ts = np.int64(time.time())
+            # Calculate extension needed for SMAs
+            max_sma = max(STOCK_SMA)
+            fc = 1.3 if timeframe == "1d" else 0.6
+            extension = np.int64(max_sma * 24 * 3600 * fc)
+            extended_start = np.int64(start_ts - extension)
 
-        # Parse timeframe
-        multiplier, timespan = parse_time_string(timeframe)
+            # Default end_ts to current time if not provided
+            if end_ts is None:
+                end_ts = np.int64(time.time())
 
-        # Request data from Polygon
-        aggs = self.client.list_aggs(
-            ticker,
-            multiplier,
-            timespan,
-            np.int64(extended_start * 1000),
-            np.int64(end_ts * 1000),
-            limit=10000
-        )
+            # Fetch aggregates from Polygon
+            aggs = self.client.get_aggs(
+                ticker,
+                multiplier,
+                timespan,
+                np.int64(extended_start * 1000),
+                np.int64(end_ts * 1000),
+                limit=10000
+            )
 
-        if not aggs:
-            return False, pd.DataFrame()
+            if not aggs:
+                return False, pd.DataFrame(), False
 
-        # Convert to DataFrame with timestamp
-        df = pd.DataFrame([{
-            'timestamp': np.int64(agg.timestamp // 1000),
-            'open': np.float64(agg.open),
-            'close': np.float64(agg.close),
-            'high': np.float64(agg.high),
-            'low': np.float64(agg.low),
-            'volume': np.float64(agg.volume)
-        } for agg in aggs])
+            # Convert to DataFrame with timestamp
+            df = pd.DataFrame([{
+                'timestamp': np.int64(agg.timestamp // 1000),
+                'open': np.float64(agg.open),
+                'close': np.float64(agg.close),
+                'high': np.float64(agg.high),
+                'low': np.float64(agg.low),
+                'volume': np.float64(agg.volume)
+            } for agg in aggs])
 
-        if df.empty:
-            return False, df
+            if df.empty:
+                return False, df
 
-        # Sort by timestamp
-        df = df.sort_values('timestamp')
+            # Sort by timestamp
+            df = df.sort_values('timestamp')
 
-        # Filter market hours (9:00 AM - 4:00 PM NY time)
-        if timespan == "hour" or timespan == "minute":
-            # Create temporary datetime column in NY timezone for filtering
-            ny_tz = timezone('America/New_York')
-            temp_dt = pd.to_datetime(df['timestamp'], unit='s', utc=True).dt.tz_convert(ny_tz)
-            
-            # Create filter based on NY market hours
-            if timespan == "hour":
-                market_hours_filter = temp_dt.dt.time.between(
-                    pd.to_datetime('09:00').time(),
-                    pd.to_datetime('16:00').time(),
-                    inclusive='left'
-                )
-            else:  # minute timeframe
-                market_hours_filter = temp_dt.dt.time.between(
-                    pd.to_datetime('09:30').time(),
-                    pd.to_datetime('16:00').time(),
-                    inclusive='left'
-                )
-            
-            # Apply filter and drop temporary column
-            df = df[market_hours_filter]
+            # Filter market hours (9:00 AM - 4:00 PM NY time)
+            if timespan == "hour" or timespan == "minute":
+                # Create temporary datetime column in NY timezone for filtering
+                ny_tz = timezone('America/New_York')
+                temp_dt = pd.to_datetime(df['timestamp'], unit='s', utc=True).dt.tz_convert(ny_tz)
+                
+                # Create filter based on NY market hours
+                if timespan == "hour":
+                    market_hours_filter = temp_dt.dt.time.between(
+                        pd.to_datetime('09:00').time(),
+                        pd.to_datetime('16:00').time(),
+                        inclusive='left'
+                    )
+                else:  # minute timeframe
+                    market_hours_filter = temp_dt.dt.time.between(
+                        pd.to_datetime('09:30').time(),
+                        pd.to_datetime('16:00').time(),
+                        inclusive='left'
+                    )
+                
+                # Apply filter and drop temporary column
+                df = df[market_hours_filter]
 
-        # Validate data quality
-        if validate and not self._validate_data_quality(df):
-            return False, pd.DataFrame()
+            # Validate data quality
+            if validate and not self._validate_data_quality(df):
+                return False, pd.DataFrame(), True
 
-        # Calculate SMAs
-        for period in STOCK_SMA:
-            df[f'sma_{period}'] = df['close'].rolling(window=period).mean().astype(np.float64)
+            # Calculate SMAs
+            for period in STOCK_SMA:
+                df[f'sma_{period}'] = df['close'].rolling(window=period).mean()
 
-        # Calculate ATR if requested
-        if atr:
-            df['atr'] = calculate_atr(df, period=ATR_PERIOD).astype(np.float64)
+            # Calculate ATR if requested
+            if atr:
+                df['atr'] = calculate_atr(df, period=ATR_PERIOD)
 
-        # Drop rows with NaN values
-        if dropna:
-            df = df.dropna()
+            # Drop rows with NaN if requested
+            if dropna:
+                df = df.dropna()
 
-        # Filter to requested time range and reset index
-        df = df[(df['timestamp'] >= start_ts) & (df['timestamp'] <= end_ts)]
-        df = df.reset_index(drop=True)
+            return True, df, True
 
-        return True, df
+        except Exception as e:
+            print(f"Error downloading stock data for {ticker}: {e}")
+            return False, pd.DataFrame(), False
 
     def get_all_tickers(self):
-        """Get all stock symbols from both StockSymbol and Polygon"""
-        # Get symbols from StockSymbol
+        """
+        Get all available stock tickers
+        """
         ss = StockSymbol(self.api_keys["stocksymbol"])
-        stock_symbol_list = [x for x in ss.get_symbol_list(market="US", symbols_only=True)
-                           if "." not in x]
-
-        # Get symbols from Polygon
-        polygon_stocks = self.client.list_tickers(
-            market="stocks",
-            # type="CS",
-            active=True,
-            limit=1000
-        )
-        polygon_common_stocks = [ticker.ticker for ticker in polygon_stocks]
-
-        # Merge and return unique symbols
-        all_symbols = sorted(set(stock_symbol_list).union(set(polygon_common_stocks)))
-        print(f"Found {len(all_symbols)} unique stock symbols")
-        return all_symbols
+        symbol_list = ss.get_symbol_list(market="US")
+        return [s["symbol"] for s in symbol_list]
 
 
 class CryptoDownloader:
-    def __init__(self):
+    def __init__(self, cache_dir=None):
         self.binance_client = Client(requests_params={"timeout": 300})
+        if cache_dir is None:
+            # Get the directory where this script is located
+            current_file_path = Path(__file__).resolve()
+            # src is the parent, screener is the parent of src
+            project_root = current_file_path.parent.parent
+            self.cache_dir = project_root / "data_cache"
+        else:
+            self.cache_dir = Path(cache_dir)
+        
+        self.cache_dir.mkdir(exist_ok=True)
+
+    def _get_cache_path(self, symbol, timeframe):
+        return self.cache_dir / f"binance_{symbol}_{timeframe}.pkl"
 
     def get_all_symbols(self):
         """
@@ -280,18 +285,11 @@ class CryptoDownloader:
 
         return True
 
-    def get_data(self, crypto, start_ts=None, end_ts=None, timeframe="4h", dropna=True, atr=True, validate=True) -> tuple[bool, pd.DataFrame]:
+    def get_data(self, crypto, start_ts=None, end_ts=None, timeframe="4h", dropna=True, atr=True, validate=True) -> tuple[bool, pd.DataFrame, bool]:
         """
         Get cryptocurrency data with SMA calculation and data quality validation
-        Args:
-            crypto: Cryptocurrency symbol
-            start_ts: Start timestamp (default: None, fetches latest 1500 datapoints)
-            end_ts: End timestamp (default: current time)
-            timeframe: Time interval (e.g., "5m", "15m", "1h", "4h")
-            dropna: Whether to drop NA values (default: True)
-            atr: Whether to calculate ATR (default: True)
         Returns:
-            (success, DataFrame)
+            (success, DataFrame, fetched_from_network)
         """
         try:
             # Default end_ts to current time if not provided
@@ -301,6 +299,17 @@ class CryptoDownloader:
             # Convert to milliseconds for Binance API
             end_ts_ms = np.int64(end_ts * 1000)
             
+            # Load cache
+            cache_path = self._get_cache_path(crypto, timeframe)
+            cached_klines = []
+            if cache_path.exists():
+                try:
+                    with open(cache_path, 'rb') as f:
+                        cached_klines = pickle.load(f)
+                except:
+                    cached_klines = []
+
+            new_data_fetched = False
             if start_ts is None:
                 # Fetch only the latest 1500 datapoints
                 response = self.binance_client.futures_klines(
@@ -308,6 +317,8 @@ class CryptoDownloader:
                     interval=timeframe,
                     limit=1500
                 )
+                all_data = response
+                new_data_fetched = True
             else:
                 # Calculate extended start for SMA calculation
                 max_sma = max(CRYPTO_SMA) 
@@ -327,108 +338,90 @@ class CryptoDownloader:
                 # Extended start timestamp with buffer for SMA calculation
                 extended_start_ts_ms = np.int64(start_ts * 1000 - extension_ms)
                 
-                # Fetch historical data from the extended start date
-                all_data = []
-                current_timestamp = extended_start_ts_ms
-
-                while current_timestamp < end_ts_ms:
-                    response = self.binance_client.futures_klines(
-                        symbol=crypto,
-                        interval=timeframe,
-                        startTime=np.int64(current_timestamp),
-                        endTime=np.int64(end_ts_ms),
-                        limit=1500
-                    )
-
-                    if not response:
-                        break
-
-                    all_data.extend(response)
-                    
-                    # Update current timestamp to the last received data point + 1
-                    if response:
-                        current_timestamp = np.int64(response[-1][6]) + 1
-                    else:
-                        break
-
-                if not all_data:
-                    print(f"{crypto} -> No data retrieved")
-                    return False, pd.DataFrame()
+                # Check what's in cache
+                existing_in_range = [k for k in cached_klines if k[0] >= extended_start_ts_ms and k[0] <= end_ts_ms]
                 
-                response = all_data
+                all_data = existing_in_range
+                
+                # If cache is empty or doesn't cover the end, fetch missing
+                current_timestamp = extended_start_ts_ms
+                if all_data:
+                    current_timestamp = all_data[-1][6] + 1 # Use close_time of last kline
+                
+                # Only fetch if current_timestamp is significantly before end_ts_ms
+                # At least one full candle gap
+                if current_timestamp < (end_ts_ms - (interval_seconds * 1000)):
+                    while current_timestamp < end_ts_ms:
+                        response = self.binance_client.futures_klines(
+                            symbol=crypto,
+                            interval=timeframe,
+                            startTime=np.int64(current_timestamp),
+                            endTime=np.int64(end_ts_ms),
+                            limit=1500
+                        )
 
-            # Convert to DataFrame with timestamp as primary field
-            df = pd.DataFrame(response, 
+                        if not response:
+                            break
+
+                        all_data.extend(response)
+                        new_data_fetched = True
+                        
+                        if response:
+                            current_timestamp = np.int64(response[-1][6]) + 1
+                        else:
+                            break
+
+            if not all_data:
+                return False, pd.DataFrame(), False
+
+            # Update cache ONLY if new data was fetched
+            if new_data_fetched:
+                unique_klines = {k[0]: k for k in cached_klines}
+                for k in all_data:
+                    unique_klines[k[0]] = k
+                
+                sorted_klines = [unique_klines[ts] for ts in sorted(unique_klines.keys())]
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(sorted_klines, f)
+                final_klines = sorted_klines
+            else:
+                final_klines = cached_klines
+
+            if start_ts is not None:
+                final_data = [k for k in final_klines if k[0] >= extended_start_ts_ms and k[0] <= end_ts_ms]
+            else:
+                final_data = final_klines[-1500:]
+
+            df = pd.DataFrame(final_data, 
                             columns=["Datetime", "Open Price", "High Price", "Low Price", "Close Price",
                                     "Volume", "Close Time", "Quote Volume", "Number of Trades",
                                     "Taker buy base asset volume", "Taker buy quote asset volume", "Ignore"])
             
-            # Check if DataFrame is empty
             if df.empty:
-                print(f"{crypto} -> Empty DataFrame after initial conversion")
-                return False, pd.DataFrame()
+                return False, pd.DataFrame(), False
             
-            # Convert datetime to timestamp (in seconds) using int64
             df['timestamp'] = df['Datetime'].values.astype(np.int64) // 1000
-            
-            # Rename columns to match stock df format (lowercase) using float64
             df['open'] = df['Open Price'].astype(np.float64)
             df['high'] = df['High Price'].astype(np.float64)
             df['low'] = df['Low Price'].astype(np.float64)
             df['close'] = df['Close Price'].astype(np.float64)
             df['volume'] = df['Volume'].astype(np.float64)
-            
-            # Drop duplicate timestamps
             df = df.drop_duplicates(subset=['timestamp'], keep='first')
-            
-            # Sort by timestamp
             df = df.sort_values('timestamp')
 
-            # Validate data quality
             if validate and not self._validate_data_quality(df):
-                print(f"{crypto} -> Failed data quality validation")
-                return False, pd.DataFrame()
+                return False, pd.DataFrame(), new_data_fetched
             
-            # Calculate SMAs
             for duration in CRYPTO_SMA:
                 df[f"sma_{duration}"] = df['close'].rolling(window=duration).mean().astype(np.float64)
 
-            # Calculate ATR if requested
             if atr:
                 df['atr'] = calculate_atr(df, period=ATR_PERIOD).astype(np.float64)
 
-            # Drop NaN values if requested
             if dropna:
                 df = df.dropna()
             
-            # Filter to requested time range (only after calculating SMAs)
-            if start_ts is not None:
-                df = df[(df['timestamp'] >= start_ts) & (df['timestamp'] <= end_ts)]
-            
-            # Final check if we have any data left
-            if df.empty:
-                print(f"{crypto} -> No data left after filtering")
-                return False, pd.DataFrame()
-            
-            # Reset index
-            df = df.reset_index(drop=True)
-            
-            # Keep only necessary columns
-            columns_to_keep = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            
-            # Add SMA columns
-            columns_to_keep += [f'sma_{period}' for period in CRYPTO_SMA]
-            
-            # Add ATR column if calculated
-            if atr:
-                columns_to_keep.append('atr')
-                
-            df = df[columns_to_keep]
-            
-            print(f"{crypto} -> Get data from binance successfully ({len(df)} rows from {datetime.fromtimestamp(df['timestamp'].iloc[0])} to {datetime.fromtimestamp(df['timestamp'].iloc[-1])})")
-            return True, df
+            return True, df, new_data_fetched
 
         except Exception as e:
-            print(f"{crypto} -> Error: {e}")
-            return False, pd.DataFrame()
-        
+            return False, pd.DataFrame(), False
