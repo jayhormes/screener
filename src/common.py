@@ -45,7 +45,7 @@ class TrendAnalysisConfig:
         self.paa_window_size = 5
         
         # Default window scaling factors
-        self.window_scale_factors = [0.9, 0.95, 1.0, 1.05, 1.1]
+        self.window_scale_factors = [0.9, 1.0, 1.1]
         
         # Minimum query length
         self.min_query_length = 60
@@ -136,26 +136,34 @@ class DataNormalizer:
         
         # Flatten array to compute global statistics
         flat_data = data_array.flatten()
-        
+
+        # Convert to numeric once (non-numeric values -> NaN)
+        numeric_flat = pd.to_numeric(flat_data, errors='coerce')
+        numeric_data = numeric_flat.reshape(data_array.shape)
+        valid_flat = numeric_flat[pd.notna(numeric_flat)]
+
+        if len(valid_flat) == 0:
+            return np.zeros_like(data_array, dtype=float)
+
         # Step 1: Z-score normalization
-        global_mean = np.mean(flat_data)
-        global_std = np.std(flat_data)
+        global_mean = np.mean(valid_flat)
+        global_std = np.std(valid_flat)
         
         # Handle zero standard deviation
         if global_std > 0:
-            z_scored = (data_array - global_mean) / global_std
+            z_scored = (numeric_data - global_mean) / global_std
         else:
             # Fallback to min-max if std is zero
-            global_min = np.min(flat_data)
-            global_max = np.max(flat_data)
+            global_min = np.min(valid_flat)
+            global_max = np.max(valid_flat)
             if global_max > global_min:
-                z_scored = (data_array - global_min) / (global_max - global_min)
+                z_scored = (numeric_data - global_min) / (global_max - global_min)
             else:
-                z_scored = np.zeros_like(data_array)
-        
-        # Step 2: Min-max scaling to target range
-        z_min = np.min(z_scored)
-        z_max = np.max(z_scored)
+                z_scored = np.zeros_like(numeric_data, dtype=float)
+
+        # Step 2: Min-max scaling to target range (ignore NaN from non-numeric values)
+        z_min = np.nanmin(z_scored)
+        z_max = np.nanmax(z_scored)
         
         # Handle case where min equals max
         if z_max > z_min:
@@ -177,6 +185,30 @@ class DataNormalizer:
         
         # Flatten array to compute global statistics
         flat_data = data_array.flatten()
+
+        # Convert to numeric once (non-numeric values -> NaN)
+        numeric_flat = pd.to_numeric(flat_data, errors='coerce')
+
+        # Filter out non-numeric values (NaN, strings, etc.)
+        numeric_mask = pd.notna(numeric_flat)
+        flat_data = numeric_flat[numeric_mask]
+
+        # Keep a numeric array with original shape for downstream calculations
+        numeric_data = numeric_flat.reshape(data_array.shape)
+        
+        if len(flat_data) == 0:
+            # Return default params if no valid numeric data
+            return {
+                'global_mean': 0,
+                'global_std': 1,
+                'z_min': 0,
+                'z_max': 1,
+                'target_min': target_range[0],
+                'target_max': target_range[1]
+            }
+        
+        # Convert to float for calculations
+        flat_data = flat_data.astype(float)
         
         # Step 1: Z-score normalization parameters
         global_mean = np.mean(flat_data)
@@ -184,19 +216,19 @@ class DataNormalizer:
         
         # Handle zero standard deviation case
         if global_std > 0:
-            z_scored = (data_array - global_mean) / global_std
+            z_scored = (numeric_data - global_mean) / global_std
         else:
             # Fallback to min-max if std is zero
             global_min = np.min(flat_data)
             global_max = np.max(flat_data)
             if global_max > global_min:
-                z_scored = (data_array - global_min) / (global_max - global_min)
+                z_scored = (numeric_data - global_min) / (global_max - global_min)
             else:
-                z_scored = np.zeros_like(data_array)
-        
-        # Step 2: Min-max scaling parameters
-        z_min = np.min(z_scored)
-        z_max = np.max(z_scored)
+                z_scored = np.zeros_like(numeric_data, dtype=float)
+
+        # Step 2: Min-max scaling parameters (ignore NaN from non-numeric values)
+        z_min = np.nanmin(z_scored)
+        z_max = np.nanmax(z_scored)
         
         target_min, target_max = target_range
         
@@ -226,13 +258,16 @@ class DataNormalizer:
         z_max = norm_params['z_max']
         target_min = norm_params['target_min']
         target_max = norm_params['target_max']
-        
+
+        # Convert to numeric (non-numeric values -> NaN) to avoid object-array math errors
+        numeric_data = pd.to_numeric(data_array.flatten(), errors='coerce').reshape(data_array.shape)
+
         # Apply Z-score normalization using stored parameters
         if global_std > 0:
-            z_scored = (data_array - global_mean) / global_std
+            z_scored = (numeric_data - global_mean) / global_std
         else:
             # This is a fallback case that should rarely happen
-            z_scored = np.zeros_like(data_array)
+            z_scored = np.zeros_like(numeric_data, dtype=float)
         
         # Apply min-max scaling using stored parameters
         if z_max > z_min:
@@ -321,8 +356,11 @@ class TimeSeriesProcessor:
         
         # Add volume mapping if needed and available
         if include_volume and 'volume' in df.columns:
+            # Drop the original capital-V 'Volume' column to avoid duplicate columns after rename
+            if 'Volume' in df.columns:
+                df = df.drop(columns=['Volume'])
             column_mapping['volume'] = 'Volume'
-        
+
         df = df.rename(columns=column_mapping)
         
         # Calculate SMA difference features
@@ -932,7 +970,7 @@ def parse_target_symbols(filepath: str, target_section: str = "###TARGETS") -> L
         return []
 
     targets = []
-    with open(filepath, 'r') as f:
+    with open(filepath, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
     target_section_found = False

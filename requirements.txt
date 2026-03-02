@@ -1,6 +1,7 @@
 pytz
 pandas
 requests
+aiohttp
 stocksymbol
 python-binance
 polygon-api-client

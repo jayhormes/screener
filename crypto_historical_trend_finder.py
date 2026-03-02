@@ -35,6 +35,7 @@ Example workflow:
 
 import os
 import time
+import json
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -58,6 +59,18 @@ from src.common import (
    plot_candlesticks_with_volume,
    format_dt_with_tz
 )
+
+
+def load_json_config(config_path="config.json"):
+    """Load config from JSON file"""
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Config file {config_path} not found or error: {e}")
+    return {}
+
 
 # ================ Configuration ================
 # Reference trends definition
@@ -158,10 +171,14 @@ EXTENSION_FACTORS_FOR_STATS = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.5]
 class DataProcessor(BaseDataProcessor):
     """Data processor for cryptocurrency analysis with caching support"""
    
-    def __init__(self, config: TrendAnalysisConfig = None):
+    def __init__(self, config: TrendAnalysisConfig = None, json_config: dict = None):
         """Initialize data processor for crypto analysis"""
         super().__init__("crypto", config.sma_periods if config else None)
-        self.downloader = CryptoDownloader()
+        
+        # Load JSON config for CryptoDownloader optimization
+        json_cfg = json_config or load_json_config()
+        self.downloader = CryptoDownloader(config=json_cfg)
+        
         self.config = config or TrendAnalysisConfig()
 
     def get_data(self, symbol: str, timeframe: str, start_ts: int, end_ts: int, 

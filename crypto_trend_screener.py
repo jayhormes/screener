@@ -33,6 +33,7 @@ Notes:
 
 import os
 import time
+import json
 import argparse
 import pandas as pd
 import numpy as np
@@ -66,26 +67,26 @@ REFERENCE_TRENDS = {
     "AVAX": [
         [datetime(2023, 11, 9, 12, 0), datetime(2023, 11, 14, 15, 0), "1h", "standard"],
     ],
-    "MKR" :[
-        [datetime(2023, 6, 26, 13, 0), datetime(2023, 7, 17, 12, 0), "4h", "standard"],
-    ],
+    #"MKR" :[
+    #    [datetime(2023, 6, 26, 13, 0), datetime(2023, 7, 17, 12, 0), "4h", "standard"],
+    #],
     "CRV": [
         [datetime(2024, 11, 4, 0, 0), datetime(2024, 11, 21, 0, 0), "4h", "uptrend"],
         [datetime(2024, 11, 4, 0, 0), datetime(2024, 11, 28, 0, 0), "4h", "uptrend_2"],
         
     ],
-    "GMT": [
-        [datetime(2022, 3, 26, 9, 0), datetime(2022, 4, 14, 21, 0), "4h", "uptrend"]
-    ],
+    #"GMT": [
+    #    [datetime(2022, 3, 26, 9, 0), datetime(2022, 4, 14, 21, 0), "4h", "uptrend"]
+    #],
     "SOL": [
         [datetime(2023, 9, 23, 0, 0), datetime(2023, 10, 15, 21, 0), "4h", "standard"]
     ],
-    "LQTY": [
-        [datetime(2025, 5, 7, 5, 0), datetime(2025, 5, 9, 21, 0), "30m", "standard"]
-    ],
-    "MOODENG":[
-        [datetime(2025, 5, 8, 0, 0), datetime(2025, 5, 11, 1, 0), "1h", "standard"]
-    ],
+    #"LQTY": [
+    #    [datetime(2025, 5, 7, 5, 0), datetime(2025, 5, 9, 21, 0), "30m", "standard"]
+    #],
+    #"MOODENG":[
+    #    [datetime(2025, 5, 8, 0, 0), datetime(2025, 5, 11, 1, 0), "1h", "standard"]
+    #],
 }
 
 # ================ Configuration ================
@@ -97,7 +98,8 @@ TIMEZONE = "America/Los_Angeles"
 OUTPUT_DIR = "similarity_output"
 
 # Timeframes to analyze
-TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
+#TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
+TIMEFRAMES_TO_ANALYZE = ["15m"]
 
 # Discord notification settings
 SEND_NOTIFICATIONS_ONLY_AFTER_ALL_TIMEFRAMES = True  # Set to False to send after each timeframe
@@ -124,7 +126,8 @@ PAA_WINDOW_SIZE = 5    # Window size for PAA descriptor
 
 # Constants for similarity calculation
 SMA_PERIODS = [30, 45, 60]
-DTW_WINDOW_FACTORS = [0.9, 0.95, 1.0, 1.05, 1.1]  # Window size factors for DTW
+DTW_WINDOW_FACTORS = [0.9, 1.0, 1.1]  # Window size factors for DTW
+PRE_SCREEN_TOP_N = 30  # Number of top candidates for full ShapeDTW
 MIN_QUERY_LENGTH = 60  # Minimum number of data points required for query trend
 
 # BINANCE API request interval parameter
@@ -134,17 +137,31 @@ API_SLEEP_SECONDS = 0.5 # Sleep time between requests (seconds)
 REQUEST_TIME_BUFFER_RATIO = 1.2
 
 
+def load_json_config(config_path="config.json"):
+    """Load config from JSON file"""
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Config file {config_path} not found or error: {e}")
+    return {}
+
+
 # ================ Data Processing Classes ================
 
 class DataProcessor(BaseDataProcessor):
     """Data processor for both stocks and cryptocurrencies"""
     
-    def __init__(self, asset_type: str, config: TrendAnalysisConfig = None):
+    def __init__(self, asset_type: str, config: TrendAnalysisConfig = None, json_config: dict = None):
         """Initialize appropriate downloader based on asset type"""
         super().__init__(asset_type, config.sma_periods if config else None)
         
+        # Load JSON config for CryptoDownloader optimization
+        json_cfg = json_config or load_json_config()
+        
         if asset_type == "crypto":
-            self.downloader = CryptoDownloader()
+            self.downloader = CryptoDownloader(config=json_cfg)
         else:
             self.downloader = StockDownloader(save_dir=".", api_file="api_keys.json")
         
@@ -374,6 +391,48 @@ def process_symbol_dtw(args: tuple) -> dict:
         "window_data": similarity_result["window_data"],
         "window_info": similarity_result["window_info"]
     }
+
+
+def process_symbol_dtw_prescreen(args: tuple) -> dict:
+    """Stage 1: cheap DTW only (no ShapeDTW) — for pre-screening all symbols."""
+    target_symbol, target_df, timeframe, ref_symbol, ref_idx, ref_df, ref_timeframe, ref_label, config = args
+
+    query_len = len(ref_df)
+    if len(target_df) < query_len * min(config.window_scale_factors):
+        return {"symbol": target_symbol, "prescreen_score": 0.0}
+
+    dtw_calc = DTWCalculator(config)
+    query_price_norm, query_diff_norm = dtw_calc.normalize_features(ref_df)
+
+    best_score = 0.0
+    for factor in config.window_scale_factors:
+        window_size = int(query_len * factor)
+        if window_size > len(target_df):
+            continue
+        start_idx = len(target_df) - window_size
+        window = target_df.iloc[start_idx:]
+        window_price_norm, window_diff_norm = dtw_calc.normalize_features(window)
+
+        _, price_dist, _ = dtw_calc.calculate_dtw_similarity(
+            query_price_norm, window_price_norm,
+            config.dtw_window_ratio, config.dtw_max_point_distance
+        )
+        if np.isinf(price_dist):
+            continue
+        _, diff_dist, _ = dtw_calc.calculate_dtw_similarity(
+            query_diff_norm, window_diff_norm,
+            config.dtw_window_ratio_diff, config.dtw_max_point_distance_diff
+        )
+        if np.isinf(diff_dist):
+            continue
+
+        price_score = 1 / (1 + price_dist)
+        diff_score = 1 / (1 + diff_dist * config.shapedtw_balance_pd_ratio)
+        score = price_score * config.price_weight + diff_score * config.diff_weight
+        if score > best_score:
+            best_score = score
+
+    return {"symbol": target_symbol, "prescreen_score": best_score}
 
 
 # ================ Visualization Functions ================
@@ -802,33 +861,41 @@ def main():
         print(f"Calculated history duration: {history_seconds} seconds ({history_seconds/86400:.1f} days)")
         print(f"Start timestamp: {start_ts}, date: {datetime.fromtimestamp(start_ts)}")
         
-        # For crypto, pre-fetch all target data (has API request delay)
+        # For crypto, pre-fetch all target data concurrently via batch_get_data
         if args.asset == "crypto":
             print(f"Getting data for all crypto symbols in timeframe {timeframe}...")
+
+            # Build full symbol names (add USDT suffix) matching DataProcessor.get_data logic
+            symbol_map = {
+                s: (f"{s}USDT" if not s.endswith("USDT") else s)
+                for s in target_symbols
+            }
+            full_symbols = list(symbol_map.values())
+
+            # buffer_start_ts mirrors DataProcessor.get_data include_buffer logic
+            buffer_start_ts = start_ts - (end_ts - start_ts)
+            ts_start = pd.Timestamp.fromtimestamp(start_ts)
+            ts_end = pd.Timestamp.fromtimestamp(end_ts)
+
+            start_fetch_time = time.time()
+            batch_results = data_processor.downloader.batch_get_data(
+                full_symbols, buffer_start_ts, end_ts, timeframe=timeframe
+            )
+            fetch_duration = time.time() - start_fetch_time
+
+            cached_count = sum(1 for ok, df, fetched in batch_results.values() if not fetched)
+            network_count = sum(1 for ok, df, fetched in batch_results.values() if fetched)
+            print(f"  Batch fetch done in {fetch_duration:.1f}s — Cache hits: {cached_count}, Network fetches: {network_count}")
+
             target_data = {}
-            
-            for symbol in target_symbols:
-                print(f"Getting data for {symbol} [{timeframe}]...")
-                
-                # Get data for this symbol
-                start_fetch_time = time.time()
-                df, fetched_from_network = data_processor.get_data(
-                    symbol,
-                    timeframe,
-                    start_ts,
-                    end_ts,
-                    is_crypto=True
-                )
-                fetch_duration = time.time() - start_fetch_time
-                
-                if not df.empty and len(df) > 0:
-                    print(f"  Got data from {df.index[0]} to {df.index[-1]}, {len(df)} points")
-                    target_data[symbol] = df
-                
-                # Sleep to avoid triggering API rate limits ONLY if we actually fetched from API
-                if fetched_from_network:
-                    time.sleep(api_sleep_seconds)
-            
+            for sym, sym_full in symbol_map.items():
+                ok, df, fetched = batch_results.get(sym_full, (False, pd.DataFrame(), False))
+                if ok and not df.empty:
+                    df = data_processor.processor.prepare_dataframe(df)
+                    df = df[(df.index >= ts_start) & (df.index <= ts_end)]
+                    if len(df) > 0:
+                        target_data[sym] = df
+
             print(f"Successfully retrieved data for {len(target_data)} out of {len(target_symbols)} symbols")
         else:
             # For stocks, we'll fetch data on-demand in parallel processing
@@ -863,8 +930,21 @@ def main():
                 # Process DTW calculations in parallel
                 # Ensure at least 1 process, but don't exceed available CPUs or symbol count
                 num_processes = max(1, min(cpu_count()-1, len(valid_symbols))) if len(valid_symbols) > 1 else 1
+
+                # Stage 1: pre-screen with cheap DTW (no ShapeDTW)
                 with Pool(processes=num_processes) as pool:
-                    results = pool.map(process_symbol_dtw, process_args)
+                    prescreen_results = pool.map(process_symbol_dtw_prescreen, process_args)
+
+                # Select top-N candidates for full ShapeDTW
+                top_n = min(PRE_SCREEN_TOP_N, len(process_args))
+                prescreen_sorted = sorted(prescreen_results, key=lambda x: x["prescreen_score"], reverse=True)
+                top_symbols = {r["symbol"] for r in prescreen_sorted[:top_n]}
+                top_args = [a for a in process_args if a[0] in top_symbols]
+                print(f"  Pre-screen: {len(top_symbols)}/{len(process_args)} symbols selected for ShapeDTW")
+
+                # Stage 2: full ShapeDTW only on top-N candidates
+                with Pool(processes=num_processes) as pool:
+                    results = pool.map(process_symbol_dtw, top_args)
                 
                 # Process results
                 target_scores = {}
