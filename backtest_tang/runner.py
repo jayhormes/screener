@@ -7,7 +7,13 @@ import pandas as pd
 
 from .engine import BacktestEngine
 from .metrics import summarize_results
-from .signals import build_indicator_frame, detect_raw_signal, qualify_signal
+from .signals import (
+    DEFAULT_DTW_THRESHOLD,
+    build_indicator_frame,
+    detect_raw_signal,
+    load_reference_patterns,
+    qualify_signal,
+)
 
 
 DEFAULT_SYMBOL = "AVAXUSDT"
@@ -37,6 +43,9 @@ def run_backtest(
     timeframe: str = DEFAULT_TIMEFRAME,
     capital: float = 1000.0,
     risk_fraction: float = 0.02,
+    use_dtw_filter: bool = False,
+    dtw_threshold: float = DEFAULT_DTW_THRESHOLD,
+    reference_symbol: str | None = None,
 ) -> dict:
     data_path, output_path = resolve_paths(symbol, timeframe, data_path, output_path)
 
@@ -47,13 +56,23 @@ def run_backtest(
     engine = BacktestEngine()
     signal_counts = {0: 0, 1: 0, 2: 0}
 
-    for index, row in frame.iterrows():
+    reference_symbol = reference_symbol or symbol.replace("USDT", "")
+    reference_patterns = load_reference_patterns(reference_symbol, timeframe) if use_dtw_filter else {}
+
+    for index in range(len(frame)):
+        row = frame.iloc[index]
         engine.update(row)
 
         if engine.has_open_position():
             continue
 
-        raw_signal = detect_raw_signal(row)
+        raw_signal = detect_raw_signal(
+            frame,
+            index,
+            reference_patterns=reference_patterns,
+            dtw_threshold=dtw_threshold,
+            use_dtw_filter=use_dtw_filter,
+        )
         if raw_signal is None:
             continue
 
@@ -87,17 +106,28 @@ def run_backtest(
     trades_df.to_csv(output_path, index=False)
 
     summary = summarize_results(signal_counts, engine.trades)
-    print_summary(summary, symbol=symbol, timeframe=timeframe)
+    print_summary(summary, symbol=symbol, timeframe=timeframe, use_dtw_filter=use_dtw_filter, dtw_threshold=dtw_threshold)
     print(f"\nCSV 已輸出：{output_path}")
     return {
         "summary": summary,
         "trades": engine.trades,
         "output_path": str(output_path),
+        "use_dtw_filter": use_dtw_filter,
+        "dtw_threshold": dtw_threshold,
     }
 
 
-def print_summary(summary: dict, symbol: str = DEFAULT_SYMBOL, timeframe: str = DEFAULT_TIMEFRAME) -> None:
-    print(f"T桑走勢策略回測摘要（{symbol} {timeframe}）")
+def print_summary(
+    summary: dict,
+    symbol: str = DEFAULT_SYMBOL,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    use_dtw_filter: bool = False,
+    dtw_threshold: float = DEFAULT_DTW_THRESHOLD,
+) -> None:
+    suffix = f" | DTW={'ON' if use_dtw_filter else 'OFF'}"
+    if use_dtw_filter:
+        suffix += f" (threshold={dtw_threshold:.2f})"
+    print(f"T桑走勢策略回測摘要（{symbol} {timeframe}{suffix}）")
     for level in (0, 1, 2):
         stats = summary["by_level"][level]
         print(
