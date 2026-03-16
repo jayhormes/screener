@@ -10,16 +10,36 @@ from .metrics import summarize_results
 from .signals import build_indicator_frame, detect_raw_signal, qualify_signal
 
 
-DEFAULT_DATA_PATH = Path("data_cache/binance_AVAXUSDT_30m.pkl")
-DEFAULT_OUTPUT_PATH = Path("output/backtest_tang_AVAXUSDT_30m_results.csv")
+DEFAULT_SYMBOL = "AVAXUSDT"
+DEFAULT_TIMEFRAME = "30m"
+DATA_CACHE_DIR = Path("data_cache")
+OUTPUT_DIR = Path("output")
+
+
+def resolve_paths(
+    symbol: str,
+    timeframe: str,
+    data_path: Path | None = None,
+    output_path: Path | None = None,
+) -> tuple[Path, Path]:
+    """Auto-resolve data and output paths from symbol + timeframe if not given explicitly."""
+    if data_path is None:
+        data_path = DATA_CACHE_DIR / f"binance_{symbol}_{timeframe}.pkl"
+    if output_path is None:
+        output_path = OUTPUT_DIR / f"backtest_tang_{symbol}_{timeframe}_results.csv"
+    return Path(data_path), Path(output_path)
 
 
 def run_backtest(
-    data_path: Path = DEFAULT_DATA_PATH,
-    output_path: Path = DEFAULT_OUTPUT_PATH,
+    data_path: Path | None = None,
+    output_path: Path | None = None,
+    symbol: str = DEFAULT_SYMBOL,
+    timeframe: str = DEFAULT_TIMEFRAME,
     capital: float = 1000.0,
     risk_fraction: float = 0.02,
 ) -> dict:
+    data_path, output_path = resolve_paths(symbol, timeframe, data_path, output_path)
+
     with Path(data_path).open("rb") as file:
         raw_rows = pickle.load(file)
 
@@ -47,7 +67,6 @@ def run_backtest(
     if engine.has_open_position():
         engine.force_close(frame.iloc[-1])
 
-    output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     trades_df = pd.DataFrame([trade.to_dict() for trade in engine.trades])
     if trades_df.empty:
@@ -68,7 +87,7 @@ def run_backtest(
     trades_df.to_csv(output_path, index=False)
 
     summary = summarize_results(signal_counts, engine.trades)
-    print_summary(summary)
+    print_summary(summary, symbol=symbol, timeframe=timeframe)
     print(f"\nCSV 已輸出：{output_path}")
     return {
         "summary": summary,
@@ -77,8 +96,8 @@ def run_backtest(
     }
 
 
-def print_summary(summary: dict) -> None:
-    print("T桑走勢策略回測摘要（AVAXUSDT 30m）")
+def print_summary(summary: dict, symbol: str = DEFAULT_SYMBOL, timeframe: str = DEFAULT_TIMEFRAME) -> None:
+    print(f"T桑走勢策略回測摘要（{symbol} {timeframe}）")
     for level in (0, 1, 2):
         stats = summary["by_level"][level]
         print(
