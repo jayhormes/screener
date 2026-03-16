@@ -1,5 +1,8 @@
 .DS_Store
 .idea/
+.claude/
+.vscode/
+__pycache__/
 trade
 output
 /src/__pycache__/*.pyc
@@ -10,6 +13,9 @@ similarity_output
 config.json
 api_keys.json
 
+# Local scratch/output files
+RS_*.txt
+
 # Local databases/cache
 *.db
-data_cache/*.db
+data_cache/
