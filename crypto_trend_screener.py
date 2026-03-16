@@ -98,8 +98,8 @@ TIMEZONE = "America/Los_Angeles"
 OUTPUT_DIR = "similarity_output"
 
 # Timeframes to analyze
-#TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
-TIMEFRAMES_TO_ANALYZE = ["15m"]
+TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
+#TIMEFRAMES_TO_ANALYZE = ["15m"]
 
 # Discord notification settings
 SEND_NOTIFICATIONS_ONLY_AFTER_ALL_TIMEFRAMES = True  # Set to False to send after each timeframe
