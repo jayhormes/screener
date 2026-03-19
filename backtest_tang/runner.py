@@ -5,21 +5,17 @@ from pathlib import Path
 
 import pandas as pd
 
+from .dtw_scanner import ReferenceInfo, load_reference_frame, matches_to_dataframe, scan_dtw_matches
 from .engine import BacktestEngine
 from .metrics import summarize_results
-from .signals import (
-    DEFAULT_DTW_THRESHOLD,
-    build_indicator_frame,
-    detect_raw_signal,
-    load_reference_patterns,
-    qualify_signal,
-)
+from .signals import DEFAULT_DTW_THRESHOLD, build_indicator_frame, detect_raw_signal, qualify_signal
 
 
 DEFAULT_SYMBOL = "AVAXUSDT"
 DEFAULT_TIMEFRAME = "30m"
 DATA_CACHE_DIR = Path("data_cache")
 OUTPUT_DIR = Path("output")
+DEFAULT_MATCH_LOOKAHEAD_BARS = 5
 
 
 def resolve_paths(
@@ -36,6 +32,30 @@ def resolve_paths(
     return Path(data_path), Path(output_path)
 
 
+def _resolve_dtw_output_paths(symbol: str, timeframe: str, output_path: Path | None) -> tuple[Path, Path]:
+    matches_output = OUTPUT_DIR / f"dtw_matches_{symbol}_{timeframe}.csv"
+    if output_path is None:
+        output_path = OUTPUT_DIR / f"backtest_tang_{symbol}_{timeframe}_dtw_v2_results.csv"
+    return matches_output, Path(output_path)
+
+
+def _build_allowed_entry_indices(frame: pd.DataFrame, matches_df: pd.DataFrame, lookahead_bars: int) -> set[int]:
+    allowed_indices: set[int] = set()
+    if matches_df.empty:
+        return allowed_indices
+
+    close_times = frame["close_time"]
+    for match in matches_df.itertuples(index=False):
+        end_ts = pd.Timestamp(match.end)
+        matched = close_times.index[close_times == end_ts]
+        if len(matched) == 0:
+            continue
+        end_idx = int(matched[0])
+        for idx in range(end_idx, min(len(frame), end_idx + lookahead_bars + 1)):
+            allowed_indices.add(idx)
+    return allowed_indices
+
+
 def run_backtest(
     data_path: Path | None = None,
     output_path: Path | None = None,
@@ -46,18 +66,30 @@ def run_backtest(
     use_dtw_filter: bool = False,
     dtw_threshold: float = DEFAULT_DTW_THRESHOLD,
     reference_symbol: str | None = None,
+    dtw_match_lookahead_bars: int = DEFAULT_MATCH_LOOKAHEAD_BARS,
 ) -> dict:
-    data_path, output_path = resolve_paths(symbol, timeframe, data_path, output_path)
+    data_path, default_output_path = resolve_paths(symbol, timeframe, data_path, output_path)
 
     with Path(data_path).open("rb") as file:
         raw_rows = pickle.load(file)
 
     frame = build_indicator_frame(raw_rows)
+    matches_df = pd.DataFrame()
+    allowed_entry_indices: set[int] | None = None
+    actual_output_path = Path(output_path or default_output_path)
+
+    if use_dtw_filter:
+        reference_info = ReferenceInfo(symbol=reference_symbol or symbol, timeframe=timeframe)
+        reference_frame = load_reference_frame(reference_info)
+        matches = scan_dtw_matches(frame, reference_frame, threshold=dtw_threshold)
+        matches_df = matches_to_dataframe(matches)
+        matches_output_path, actual_output_path = _resolve_dtw_output_paths(symbol, timeframe, output_path)
+        matches_output_path.parent.mkdir(parents=True, exist_ok=True)
+        matches_df.to_csv(matches_output_path, index=False)
+        allowed_entry_indices = _build_allowed_entry_indices(frame, matches_df, dtw_match_lookahead_bars)
+
     engine = BacktestEngine()
     signal_counts = {0: 0, 1: 0, 2: 0}
-
-    reference_symbol = reference_symbol or symbol.replace("USDT", "")
-    reference_patterns = load_reference_patterns(reference_symbol, timeframe) if use_dtw_filter else {}
 
     for index in range(len(frame)):
         row = frame.iloc[index]
@@ -66,13 +98,10 @@ def run_backtest(
         if engine.has_open_position():
             continue
 
-        raw_signal = detect_raw_signal(
-            frame,
-            index,
-            reference_patterns=reference_patterns,
-            dtw_threshold=dtw_threshold,
-            use_dtw_filter=use_dtw_filter,
-        )
+        if allowed_entry_indices is not None and index not in allowed_entry_indices:
+            continue
+
+        raw_signal = detect_raw_signal(frame, index, use_dtw_filter=False)
         if raw_signal is None:
             continue
 
@@ -86,7 +115,7 @@ def run_backtest(
     if engine.has_open_position():
         engine.force_close(frame.iloc[-1])
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    actual_output_path.parent.mkdir(parents=True, exist_ok=True)
     trades_df = pd.DataFrame([trade.to_dict() for trade in engine.trades])
     if trades_df.empty:
         trades_df = pd.DataFrame(
@@ -103,17 +132,22 @@ def run_backtest(
                 "exit_reason",
             ]
         )
-    trades_df.to_csv(output_path, index=False)
+    trades_df.to_csv(actual_output_path, index=False)
 
     summary = summarize_results(signal_counts, engine.trades)
     print_summary(summary, symbol=symbol, timeframe=timeframe, use_dtw_filter=use_dtw_filter, dtw_threshold=dtw_threshold)
-    print(f"\nCSV 已輸出：{output_path}")
+    if use_dtw_filter:
+        print(f"DTW matches={len(matches_df)} | allowed_entry_bars={len(allowed_entry_indices or set())}")
+        print(f"DTW matches CSV 已輸出：{matches_output_path}")
+    print(f"\nCSV 已輸出：{actual_output_path}")
     return {
         "summary": summary,
         "trades": engine.trades,
-        "output_path": str(output_path),
+        "output_path": str(actual_output_path),
         "use_dtw_filter": use_dtw_filter,
         "dtw_threshold": dtw_threshold,
+        "matches": matches_df,
+        "allowed_entry_indices": sorted(allowed_entry_indices) if allowed_entry_indices is not None else None,
     }
 
 

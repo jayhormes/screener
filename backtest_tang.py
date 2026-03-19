@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from backtest_tang import run_backtest
+from backtest_tang.visualizer import generate_trade_charts
 
 
 MULTI_TF_OUTPUT = Path("output/backtest_tang_AVAX_multi_tf.csv")
@@ -54,25 +55,39 @@ def main() -> None:
     )
     parser.add_argument("--capital", type=float, default=1000.0, help="初始資金")
     parser.add_argument("--risk-fraction", type=float, default=0.02, help="每筆風險比例")
+    parser.add_argument("--dtw", action="store_true", help="啟用 DTW v2 掃描模式")
+    parser.add_argument("--dtw-threshold", type=float, default=0.25, help="DTW 相似度門檻")
+    parser.add_argument("--dtw-lookahead-bars", type=int, default=5, help="match 結束點後允許進場的 K 棒數")
+    parser.add_argument("--charts", action="store_true", help="產生交易圖")
     args = parser.parse_args()
 
     if args.multi_tf:
         run_multi_timeframe(args.symbol, ["15m", "30m", "1h", "2h", "4h"])
-    elif args.timeframe:
-        run_backtest(
+        return
+
+    result = run_backtest(
+        symbol=args.symbol,
+        timeframe=args.timeframe or "30m",
+        capital=args.capital,
+        risk_fraction=args.risk_fraction,
+        use_dtw_filter=args.dtw,
+        dtw_threshold=args.dtw_threshold,
+        dtw_match_lookahead_bars=args.dtw_lookahead_bars,
+    )
+
+    if args.charts:
+        chart_dir = Path("output/charts") / f"{args.symbol}_{args.timeframe or '30m'}{'_dtw_v2' if args.dtw else ''}"
+        generated = generate_trade_charts(
             symbol=args.symbol,
-            timeframe=args.timeframe,
-            capital=args.capital,
-            risk_fraction=args.risk_fraction,
+            timeframe=args.timeframe or "30m",
+            trades_path=Path(result["output_path"]),
+            output_dir=chart_dir,
         )
-    else:
-        # Default behaviour: AVAXUSDT 30m (preserves original direct-run behaviour)
-        run_backtest()
+        print(f"Generated {len(generated)} chart(s)")
 
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        # No args: keep original behaviour
         run_backtest()
     else:
         main()
