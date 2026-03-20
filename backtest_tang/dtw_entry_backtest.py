@@ -459,9 +459,9 @@ def visualize_trades(
         )
 
         axes[0].plot(reference_datetimes, reference_window["close"], color="tab:blue", linewidth=1.5)
-        axes[0].plot(reference_datetimes, reference_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
-        axes[0].plot(reference_datetimes, reference_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
-        axes[0].plot(reference_datetimes, reference_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
+        axes[0].plot(reference_datetimes, reference_window["sma30"], color="#38BDF8", linewidth=1.2, label="SMA30")
+        axes[0].plot(reference_datetimes, reference_window["sma45"], color="#818CF8", linewidth=1.2, label="SMA45")
+        axes[0].plot(reference_datetimes, reference_window["sma60"], color="#C084FC", linewidth=1.2, label="SMA60")
         axes[0].scatter(
             [reference_datetimes.iloc[reference_entry_index]],
             [reference_entry_price],
@@ -478,9 +478,9 @@ def visualize_trades(
         stop_loss_price = trade.entry_price - (trade.entry_price * abs(trade.r_value))
 
         axes[1].plot(trade_datetimes, trade_window["close"], color="tab:green", linewidth=1.5)
-        axes[1].plot(trade_datetimes, trade_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
-        axes[1].plot(trade_datetimes, trade_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
-        axes[1].plot(trade_datetimes, trade_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
+        axes[1].plot(trade_datetimes, trade_window["sma30"], color="#38BDF8", linewidth=1.2, label="SMA30")
+        axes[1].plot(trade_datetimes, trade_window["sma45"], color="#818CF8", linewidth=1.2, label="SMA45")
+        axes[1].plot(trade_datetimes, trade_window["sma60"], color="#C084FC", linewidth=1.2, label="SMA60")
         axes[1].scatter([trade_datetimes.iloc[entry_offset]], [trade.entry_price], color="orange", s=60, label="Entry", zorder=3)
         axes[1].scatter([trade_datetimes.iloc[exit_offset]], [trade.exit_price], color="red", s=60, label="Exit", zorder=3)
         axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="SL -1R")
