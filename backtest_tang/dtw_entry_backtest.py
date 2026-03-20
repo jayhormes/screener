@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import timezone, timedelta
 from pathlib import Path
+from statistics import median
 from typing import Any, Iterable
 
 import pandas as pd
@@ -18,6 +19,12 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "data_cache" / "binance_klines.db"
 EMA_FILTER_TIMEFRAMES = ("30m", "4h")
 EMA_LENGTH = 200
 CHART_TIMEZONE = timezone(timedelta(hours=8), name="GMT+8")
+SWING_LOOKBACK = 5
+GAP_THRESHOLD = 0.005
+SLOPE_THRESHOLD = 0.003
+TOUCH_TOLERANCE = 0.005
+ATR_PERIOD = 14
+BREAKOUT_BUFFER = 0.002
 
 RESULT_LINE_RE = re.compile(r"^\d+\.\s+([A-Z0-9]+)\s+\(([^)]+)\)\s*$")
 PERIOD_LINE_RE = re.compile(r"^\s*Period:\s*(.+?)\s+to\s+(.+?)\s*$")
@@ -49,6 +56,22 @@ class TradeResult:
     exit_price: float
     r_value: float
     bars_forward: int
+    stage: int | None
+    stage_stop_anchor: float | None
+    stage_stop_pct: float | None
+
+
+@dataclass
+class StageContext:
+    last_bear_cross_idx: int | None = None
+    first_cross_up_done: bool = False
+    ma30_test_count: int = 0
+    last_confirmed_swing_high_idx: int | None = None
+    last_confirmed_swing_low_idx: int | None = None
+    current_stage: int | None = None
+    converge_zone_start: int | None = None
+    last_test_touch_idx: int | None = None
+    last_breakout_swing_low_idx: int | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -295,6 +318,25 @@ def build_ema_frame(frame: pd.DataFrame, ema_length: int = EMA_LENGTH) -> pd.Dat
     return ema_frame
 
 
+def add_stage_features(frame: pd.DataFrame) -> pd.DataFrame:
+    stage_frame = frame.copy()
+    stage_frame["sma30"] = stage_frame["close"].rolling(window=30, min_periods=30).mean()
+    stage_frame["sma45"] = stage_frame["close"].rolling(window=45, min_periods=45).mean()
+    stage_frame["sma60"] = stage_frame["close"].rolling(window=60, min_periods=60).mean()
+
+    previous_close = stage_frame["close"].shift(1)
+    previous_tr = pd.concat(
+        [
+            stage_frame["high"] - stage_frame["low"],
+            (stage_frame["high"] - previous_close).abs(),
+            (stage_frame["low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    stage_frame["atr"] = previous_tr.rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean()
+    return stage_frame
+
+
 def find_window_end_index(frame: pd.DataFrame, target_period_end: pd.Timestamp) -> int:
     matches = frame.index[frame["open_time"] == target_period_end]
     if len(matches) == 0:
@@ -326,6 +368,136 @@ def passes_ema200_filter(ema_frames: dict[str, pd.DataFrame], entry_time: pd.Tim
     return True
 
 
+def is_confirmed_swing_high(frame: pd.DataFrame, pivot_idx: int, lookback: int) -> bool:
+    if pivot_idx - lookback < 0 or pivot_idx + lookback >= len(frame):
+        return False
+    pivot_high = float(frame.iloc[pivot_idx]["high"])
+    left_highs = frame.iloc[pivot_idx - lookback : pivot_idx]["high"]
+    right_highs = frame.iloc[pivot_idx + 1 : pivot_idx + lookback + 1]["high"]
+    return bool((pivot_high > left_highs).all() and (pivot_high >= right_highs).all())
+
+
+def is_confirmed_swing_low(frame: pd.DataFrame, pivot_idx: int, lookback: int) -> bool:
+    if pivot_idx - lookback < 0 or pivot_idx + lookback >= len(frame):
+        return False
+    pivot_low = float(frame.iloc[pivot_idx]["low"])
+    left_lows = frame.iloc[pivot_idx - lookback : pivot_idx]["low"]
+    right_lows = frame.iloc[pivot_idx + 1 : pivot_idx + lookback + 1]["low"]
+    return bool((pivot_low < left_lows).all() and (pivot_low <= right_lows).all())
+
+
+def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
+    if "sma30" not in frame.columns or "sma60" not in frame.columns or "atr" not in frame.columns:
+        raise ValueError("frame 缺少 stage feature 欄位")
+
+    stage_series: list[int | None] = [None] * len(frame)
+    anchor_series: list[float | None] = [None] * len(frame)
+    stop_pct_series: list[float | None] = [None] * len(frame)
+    context = StageContext()
+
+    for index in range(1, len(frame)):
+        row = frame.iloc[index]
+        prev_row = frame.iloc[index - 1]
+        sma30 = row["sma30"]
+        sma60 = row["sma60"]
+        prev_sma30 = prev_row["sma30"]
+        prev_sma60 = prev_row["sma60"]
+
+        confirm_idx = index - SWING_LOOKBACK
+        if confirm_idx >= SWING_LOOKBACK:
+            if is_confirmed_swing_low(frame, confirm_idx, SWING_LOOKBACK):
+                context.last_confirmed_swing_low_idx = confirm_idx
+            if is_confirmed_swing_high(frame, confirm_idx, SWING_LOOKBACK):
+                context.last_confirmed_swing_high_idx = confirm_idx
+                context.last_breakout_swing_low_idx = context.last_confirmed_swing_low_idx
+
+        if pd.notna(prev_sma30) and pd.notna(prev_sma60) and prev_sma30 >= prev_sma60 and sma30 < sma60:
+            context.last_bear_cross_idx = index
+            context.first_cross_up_done = False
+            context.ma30_test_count = 0
+            context.current_stage = None
+            context.converge_zone_start = None
+            context.last_test_touch_idx = None
+
+        close_cross_up = pd.notna(prev_sma30) and prev_row["close"] <= prev_sma30 and row["close"] > sma30
+        if context.last_bear_cross_idx is not None and not context.first_cross_up_done and pd.notna(sma30) and close_cross_up:
+            context.current_stage = 0
+            context.first_cross_up_done = True
+
+        ma_gap_ratio = abs(sma30 - sma60) / sma60 if pd.notna(sma30) and pd.notna(sma60) and sma60 else None
+        sma30_slope = abs((sma30 - prev_sma30) / prev_sma30) if pd.notna(sma30) and pd.notna(prev_sma30) and prev_sma30 else None
+        sma60_slope = abs((sma60 - prev_sma60) / prev_sma60) if pd.notna(sma60) and pd.notna(prev_sma60) and prev_sma60 else None
+        in_convergence = (
+            ma_gap_ratio is not None
+            and sma30_slope is not None
+            and sma60_slope is not None
+            and ma_gap_ratio <= GAP_THRESHOLD
+            and sma30_slope <= SLOPE_THRESHOLD
+            and sma60_slope <= SLOPE_THRESHOLD
+        )
+
+        if in_convergence:
+            if context.converge_zone_start is None:
+                context.converge_zone_start = index
+                context.ma30_test_count = 0
+                context.last_test_touch_idx = None
+
+            ma30_touch = abs(row["low"] - sma30) / sma30 <= TOUCH_TOLERANCE if sma30 else False
+            if ma30_touch and context.last_test_touch_idx != index - 1:
+                context.ma30_test_count += 1
+                context.last_test_touch_idx = index
+
+            if context.ma30_test_count >= 2 and close_cross_up:
+                context.current_stage = 1
+        else:
+            context.converge_zone_start = None
+            context.ma30_test_count = 0
+            context.last_test_touch_idx = None
+
+        breakout_swing_high = context.last_confirmed_swing_high_idx
+        if (
+            breakout_swing_high is not None
+            and context.last_breakout_swing_low_idx is not None
+            and breakout_swing_high > context.last_breakout_swing_low_idx
+            and pd.notna(sma30)
+            and pd.notna(sma60)
+            and sma30 > sma60
+            and ma_gap_ratio is not None
+            and ma_gap_ratio > GAP_THRESHOLD
+            and prev_sma30 is not None
+            and prev_sma30 != 0
+            and ((sma30 - prev_sma30) / prev_sma30) >= 0
+        ):
+            swing_high_price = float(frame.iloc[breakout_swing_high]["high"])
+            breakout_buffer = max(swing_high_price * BREAKOUT_BUFFER, float(row["atr"]) * BREAKOUT_BUFFER if pd.notna(row["atr"]) else 0.0)
+            if row["close"] > swing_high_price + breakout_buffer:
+                context.current_stage = 2
+
+        stage = context.current_stage
+        anchor_price: float | None = None
+        if stage == 0 and context.last_confirmed_swing_low_idx is not None:
+            anchor_price = float(frame.iloc[context.last_confirmed_swing_low_idx]["low"])
+        elif stage == 1 and pd.notna(sma30):
+            anchor_price = float(sma30)
+        elif stage == 2 and context.last_breakout_swing_low_idx is not None:
+            anchor_price = float(frame.iloc[context.last_breakout_swing_low_idx]["low"])
+
+        stop_pct = None
+        if anchor_price is not None:
+            entry_price = float(row["close"])
+            stop_pct = (entry_price - anchor_price) / entry_price if entry_price else None
+
+        stage_series[index] = stage
+        anchor_series[index] = anchor_price
+        stop_pct_series[index] = stop_pct if stop_pct is None else max(stop_pct, 0.0)
+
+    labeled = frame.copy()
+    labeled["stage"] = stage_series
+    labeled["stage_stop_anchor"] = anchor_series
+    labeled["stage_stop_pct"] = stop_pct_series
+    return labeled
+
+
 def evaluate_match(
     frame: pd.DataFrame,
     match: MatchRecord,
@@ -350,6 +522,9 @@ def evaluate_match(
     entry_price = float(entry_row["close"])
     exit_price = float(exit_row["close"])
     r_value = (exit_price - entry_price) / entry_price
+    stage = entry_row.get("stage")
+    stage_stop_anchor = entry_row.get("stage_stop_anchor")
+    stage_stop_pct = entry_row.get("stage_stop_pct")
 
     return TradeResult(
         symbol=match.symbol,
@@ -363,6 +538,9 @@ def evaluate_match(
         exit_price=exit_price,
         r_value=r_value,
         bars_forward=bars_forward,
+        stage=None if pd.isna(stage) else int(stage),
+        stage_stop_anchor=None if pd.isna(stage_stop_anchor) else float(stage_stop_anchor),
+        stage_stop_pct=None if pd.isna(stage_stop_pct) else float(stage_stop_pct),
     )
 
 
@@ -535,7 +713,7 @@ def visualize_trades(
         axes[0].grid(True, alpha=0.3)
         axes[0].legend(loc="best")
 
-        stop_loss_price = trade.entry_price - (trade.entry_price * abs(trade.r_value))
+        stop_loss_price = trade.stage_stop_anchor if trade.stage_stop_anchor is not None else trade.entry_price - (trade.entry_price * abs(trade.r_value))
 
         draw_candlesticks(axes[1], trade_datetimes, trade_window)
         axes[1].plot(trade_datetimes, trade_window["sma30"], color="#38BDF8", linewidth=1.2, label="SMA30")
@@ -547,7 +725,7 @@ def visualize_trades(
             color="orange",
             marker="^",
             s=90,
-            label="Entry",
+            label=f"Entry (Stage {trade.stage})" if trade.stage is not None else "Entry",
             zorder=4,
         )
         axes[1].scatter(
@@ -559,9 +737,9 @@ def visualize_trades(
             label="Exit",
             zorder=4,
         )
-        axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="SL -1R")
+        axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="SL Anchor")
         axes[1].annotate(
-            "SL -1R",
+            "SL Anchor",
             xy=(trade_datetimes.iloc[exit_offset], stop_loss_price),
             xytext=(-8, 6),
             textcoords="offset points",
@@ -588,7 +766,8 @@ def visualize_trades(
         configure_datetime_axis(axes[2], trade_datetimes, xlabel="Datetime (GMT+8)")
 
         outcome = "WIN" if trade.r_value > 0 else "LOSS" if trade.r_value < 0 else "FLAT"
-        fig.suptitle(f"{trade.symbol} | R={trade.r_value:.4f} | {outcome}", fontsize=14, fontweight="bold")
+        stage_text = f"Stage {trade.stage}" if trade.stage is not None else "Stage N/A"
+        fig.suptitle(f"{trade.symbol} | {stage_text} | R={trade.r_value:.4f} | {outcome}", fontsize=14, fontweight="bold")
         fig.tight_layout(rect=(0, 0, 1, 0.96))
 
         filename = (
@@ -608,12 +787,32 @@ def summarize_trade_results(trades: Iterable[TradeResult]) -> dict:
     trade_count = len(trade_list)
     win_count = sum(1 for value in r_values if value > 0)
 
+    stage_groups: dict[str, list[TradeResult]] = {"None": []}
+    for trade in trade_list:
+        key = "None" if trade.stage is None else str(trade.stage)
+        stage_groups.setdefault(key, []).append(trade)
+
+    stage_stats: dict[str, dict[str, float | int | None]] = {}
+    for key in ["0", "1", "2", "None"]:
+        group = stage_groups.get(key, [])
+        group_r_values = [item.r_value for item in group]
+        group_count = len(group)
+        group_win_count = sum(1 for value in group_r_values if value > 0)
+        stage_stats[key] = {
+            "trade_count": group_count,
+            "win_rate": (group_win_count / group_count) if group_count else 0.0,
+            "average_r": (sum(group_r_values) / group_count) if group_count else 0.0,
+            "median_r": median(group_r_values) if group_r_values else None,
+        }
+
     return {
         "trade_count": trade_count,
         "win_count": win_count,
         "win_rate": (win_count / trade_count) if trade_count else 0.0,
         "average_r": (sum(r_values) / trade_count) if trade_count else 0.0,
+        "median_r": median(r_values) if r_values else None,
         "r_values": r_values,
+        "stage_stats": stage_stats,
     }
 
 
@@ -655,6 +854,9 @@ def print_report(
                 "exit_time": trade.exit_time.isoformat(),
                 "entry_price": round(trade.entry_price, 8),
                 "exit_price": round(trade.exit_price, 8),
+                "stage": trade.stage,
+                "stage_stop_anchor": None if trade.stage_stop_anchor is None else round(trade.stage_stop_anchor, 8),
+                "stage_stop_pct": None if trade.stage_stop_pct is None else round(trade.stage_stop_pct, 6),
                 "R": round(trade.r_value, 6),
             }
             for trade in trades
@@ -664,8 +866,17 @@ def print_report(
     print("-" * 72)
     print("R values    :", [round(value, 6) for value in metrics["r_values"]])
     print(f"Average R   : {metrics['average_r']:.6f}")
+    print(f"Median R    : {metrics['median_r']:.6f}" if metrics["median_r"] is not None else "Median R    : N/A")
     print(f"Win rate    : {metrics['win_rate']:.2%}")
     print(f"Trade count : {metrics['trade_count']}")
+    print("Stage stats :")
+    for key in ["0", "1", "2", "None"]:
+        stage_metric = metrics["stage_stats"][key]
+        median_text = f"{stage_metric['median_r']:.6f}" if stage_metric["median_r"] is not None else "N/A"
+        print(
+            f"  Stage {key:>4} | count={stage_metric['trade_count']:>3} | avgR={stage_metric['average_r']:.6f} | "
+            f"medianR={median_text} | winRate={stage_metric['win_rate']:.2%}"
+        )
 
 
 def main() -> None:
@@ -713,7 +924,7 @@ def main() -> None:
             db_symbol = match.symbol if match.symbol.endswith(args.symbol_suffix) else f"{match.symbol}{args.symbol_suffix}"
             frame_key = (db_symbol, match.timeframe)
             if frame_key not in symbol_frames:
-                symbol_frames[frame_key] = load_symbol_frame(conn, db_symbol, match.timeframe)
+                symbol_frames[frame_key] = build_stage_labels(add_stage_features(load_symbol_frame(conn, db_symbol, match.timeframe)))
 
             ema_frames: dict[str, pd.DataFrame] | None = None
             if args.ema200_filter:
