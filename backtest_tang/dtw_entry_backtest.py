@@ -415,7 +415,7 @@ def build_xticks(datetimes: pd.Series, count: int = 6) -> list[pd.Timestamp]:
 def configure_datetime_axis(axis: Any, datetimes: pd.Series, xlabel: str | None = None) -> None:
     ticks = build_xticks(datetimes)
     axis.set_xticks(ticks)
-    axis.set_xticklabels([timestamp.strftime("%m-%d %H:%M") for timestamp in ticks], rotation=30, ha="right")
+    axis.set_xticklabels([timestamp.strftime("%Y-%m-%d %H:%M") for timestamp in ticks], rotation=30, ha="right")
     axis.tick_params(axis="x", labelbottom=True)
     if xlabel:
         axis.set_xlabel(xlabel)
