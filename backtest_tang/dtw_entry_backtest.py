@@ -13,6 +13,8 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REPORTS_DIR = PROJECT_ROOT / "historical_trend_finder_reports"
 DEFAULT_DB_PATH = PROJECT_ROOT / "data_cache" / "binance_klines.db"
+EMA_FILTER_TIMEFRAMES = ("30m", "4h")
+EMA_LENGTH = 200
 
 RESULT_LINE_RE = re.compile(r"^\d+\.\s+([A-Z0-9]+)\s+\(([^)]+)\)\s*$")
 PERIOD_LINE_RE = re.compile(r"^\s*Period:\s*(.+?)\s+to\s+(.+?)\s*$")
@@ -85,6 +87,11 @@ def parse_args() -> argparse.Namespace:
         "--report-timezone",
         default="America/Los_Angeles",
         help="Timezone used by results_summary.txt period strings. Default: America/Los_Angeles",
+    )
+    parser.add_argument(
+        "--ema200-filter",
+        action="store_true",
+        help="Require both 30m and 4h close prices to be above EMA200 at entry time.",
     )
     parser.add_argument(
         "--json",
@@ -186,7 +193,15 @@ def load_symbol_frame(conn: sqlite3.Connection, symbol: str, timeframe: str) -> 
 
     frame["open_time"] = pd.to_datetime(frame["open_time"], unit="ms", utc=True)
     frame["close_time"] = pd.to_datetime(frame["close_time"], unit="ms", utc=True)
+    numeric_columns = ["open", "high", "low", "close", "volume"]
+    frame[numeric_columns] = frame[numeric_columns].astype(float)
     return frame
+
+
+def build_ema_frame(frame: pd.DataFrame, ema_length: int = EMA_LENGTH) -> pd.DataFrame:
+    ema_frame = frame[["open_time", "close_time", "close"]].copy()
+    ema_frame["ema200"] = ema_frame["close"].ewm(span=ema_length, adjust=False, min_periods=ema_length).mean()
+    return ema_frame
 
 
 def find_window_end_index(frame: pd.DataFrame, target_period_end: pd.Timestamp) -> int:
@@ -196,7 +211,30 @@ def find_window_end_index(frame: pd.DataFrame, target_period_end: pd.Timestamp) 
     return int(matches[0])
 
 
-def evaluate_match(frame: pd.DataFrame, match: MatchRecord, pattern_length: int, extension_factor: float) -> TradeResult | None:
+def resolve_entry_row(frame: pd.DataFrame, entry_time: pd.Timestamp) -> pd.Series | None:
+    eligible = frame.loc[frame["close_time"] <= entry_time]
+    if eligible.empty:
+        return None
+    return eligible.iloc[-1]
+
+
+def passes_ema200_filter(ema_frames: dict[str, pd.DataFrame], entry_time: pd.Timestamp) -> bool:
+    for timeframe in EMA_FILTER_TIMEFRAMES:
+        entry_row = resolve_entry_row(ema_frames[timeframe], entry_time)
+        if entry_row is None or pd.isna(entry_row["ema200"]):
+            return False
+        if float(entry_row["close"]) <= float(entry_row["ema200"]):
+            return False
+    return True
+
+
+def evaluate_match(
+    frame: pd.DataFrame,
+    match: MatchRecord,
+    pattern_length: int,
+    extension_factor: float,
+    ema_frames: dict[str, pd.DataFrame] | None = None,
+) -> TradeResult | None:
     bars_forward = int(pattern_length * extension_factor)
     if bars_forward < 1:
         raise ValueError(f"extension_factor 太小，導致 bars_forward={bars_forward}")
@@ -207,6 +245,9 @@ def evaluate_match(frame: pd.DataFrame, match: MatchRecord, pattern_length: int,
         return None
 
     entry_row = frame.iloc[end_index]
+    if ema_frames is not None and not passes_ema200_filter(ema_frames, pd.Timestamp(entry_row["close_time"])):
+        return None
+
     exit_row = frame.iloc[exit_index]
     entry_price = float(entry_row["close"])
     exit_price = float(exit_row["close"])
@@ -249,6 +290,7 @@ def print_report(
     total_matches: int,
     skipped_matches: int,
     trades: list[TradeResult],
+    ema200_filter_enabled: bool,
 ) -> None:
     metrics = summarize_trade_results(trades)
 
@@ -257,13 +299,14 @@ def print_report(
     print(f"Pattern bars : {pattern_length}")
     print(f"Ext factor   : {extension_factor}")
     print(f"Exit bars    : {int(pattern_length * extension_factor)}")
+    print(f"EMA200 filter: {'ON (30m + 4h)' if ema200_filter_enabled else 'OFF'}")
     print(f"Matches      : {total_matches}")
     print(f"Evaluated    : {metrics['trade_count']}")
     print(f"Skipped      : {skipped_matches}")
     print("-" * 72)
 
     if not trades:
-        print("沒有可計算的交易（可能是未來資料不足）。")
+        print("沒有可計算的交易（可能是未來資料不足，或 EMA200 過濾後全數跳過）。")
         return
 
     table = pd.DataFrame(
@@ -300,21 +343,33 @@ def main() -> None:
         raise ValueError(f"summary 內沒有 match 結果：{summary_path}")
 
     conn = sqlite3.connect(args.db_path.expanduser().resolve())
-    symbol_frames: dict[str, pd.DataFrame] = {}
+    symbol_frames: dict[tuple[str, str], pd.DataFrame] = {}
+    ema_frames_by_symbol: dict[str, dict[str, pd.DataFrame]] = {}
     trades: list[TradeResult] = []
     skipped_matches = 0
 
     try:
         for match in matches:
             db_symbol = match.symbol if match.symbol.endswith(args.symbol_suffix) else f"{match.symbol}{args.symbol_suffix}"
-            if db_symbol not in symbol_frames:
-                symbol_frames[db_symbol] = load_symbol_frame(conn, db_symbol, match.timeframe)
+            frame_key = (db_symbol, match.timeframe)
+            if frame_key not in symbol_frames:
+                symbol_frames[frame_key] = load_symbol_frame(conn, db_symbol, match.timeframe)
+
+            ema_frames: dict[str, pd.DataFrame] | None = None
+            if args.ema200_filter:
+                if db_symbol not in ema_frames_by_symbol:
+                    ema_frames_by_symbol[db_symbol] = {
+                        timeframe: build_ema_frame(load_symbol_frame(conn, db_symbol, timeframe))
+                        for timeframe in EMA_FILTER_TIMEFRAMES
+                    }
+                ema_frames = ema_frames_by_symbol[db_symbol]
 
             trade = evaluate_match(
-                frame=symbol_frames[db_symbol],
+                frame=symbol_frames[frame_key],
                 match=match,
                 pattern_length=pattern_length,
                 extension_factor=args.extension_factor,
+                ema_frames=ema_frames,
             )
             if trade is None:
                 skipped_matches += 1
@@ -333,6 +388,7 @@ def main() -> None:
         total_matches=len(matches),
         skipped_matches=skipped_matches,
         trades=trades,
+        ema200_filter_enabled=args.ema200_filter,
     )
 
     if args.json:
@@ -347,6 +403,7 @@ def main() -> None:
             "pattern_length": pattern_length,
             "extension_factor": args.extension_factor,
             "exit_bars": int(pattern_length * args.extension_factor),
+            "ema200_filter": args.ema200_filter,
             "total_matches": len(matches),
             "evaluated_matches": len(trades),
             "skipped_matches": skipped_matches,
