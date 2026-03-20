@@ -8,7 +8,7 @@ def test_binance_api_exception():
 
     try:
         print("=== Start Binance API Test ===")
-        success, df = downloader.get_data("BTCUSDT", start_ts=start_ts, end_ts=end_ts, timeframe="1h")
+        success, df, _ = downloader.get_data("BTCUSDT", start_ts=start_ts, end_ts=end_ts, timeframe="1h")
         print(f"Success: {success}")
         if not df.empty:
             print(df.head())

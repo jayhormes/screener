@@ -627,13 +627,20 @@ class DataCacheManager:
                 end_timestamp
             )
             fetch_duration = time.time() - start_fetch_time
-            
-            # Handle both 2-tuple (df, fetched) and 3-tuple (success, df, fetched) returns
-            if len(result) == 3:
-                success, df, fetched_from_network = result
+
+            # Normalize legacy tuple returns and current DataFrame-only processors.
+            fetched_from_network = False
+            if isinstance(result, tuple):
+                if len(result) == 3:
+                    success, df, fetched_from_network = result
+                elif len(result) == 2:
+                    df, fetched_from_network = result
+                    success = df is not None and not df.empty
+                else:
+                    raise ValueError(f"Unsupported get_data() return format for {symbol}: {type(result)} len={len(result)}")
             else:
-                df, fetched_from_network = result
-                success = not df.empty
+                df = result
+                success = df is not None and not df.empty
             
             if success and not df.empty:
                 data_dict[symbol] = df
