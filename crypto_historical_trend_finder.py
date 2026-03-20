@@ -40,6 +40,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import argparse
@@ -732,6 +734,12 @@ def create_full_analysis_chart(reference_df: pd.DataFrame, window_df: pd.DataFra
         
         extended_df = pd.concat(extended_parts) if extended_parts else window_df
         
+        # DEBUG: verify shapes before normalization
+        print(f"[VIS DEBUG] window_df={len(window_df)} rows, extended_df={len(extended_df)} rows, "
+              f"past_count={len(past_data) if 'past_data' in dir() and past_data is not None else 0}, "
+              f"future_count={len(future_data) if 'future_data' in dir() and future_data is not None else 0}, "
+              f"extended_parts count={len(extended_parts)}", flush=True)
+        
         # Normalize data independently for each subplot
         reference_normalized_df, _ = DataNormalizer.normalize_ohlc_dataframe(reference_df, include_volume=True)
         window_normalized_df, _ = DataNormalizer.normalize_ohlc_dataframe(window_df, include_volume=True)
@@ -745,8 +753,19 @@ def create_full_analysis_chart(reference_df: pd.DataFrame, window_df: pd.DataFra
         extended_normalized = DataNormalizer.apply_normalization_params(extended_ohlc, extended_norm_params)
         
         extended_normalized_df = extended_df.copy()
-        for i, column in enumerate(['Open', 'High', 'Low', 'Close']):
-            extended_normalized_df[column] = extended_normalized[:, i]
+        
+        # Guard: if shapes don't match, rebuild extended_df from scratch
+        if extended_normalized.shape[0] != len(extended_normalized_df):
+            print(f"[VIS] Shape mismatch: normalized={extended_normalized.shape}, df={len(extended_normalized_df)}. Rebuilding extended_df.", flush=True)
+            # Re-extract from extended_df which should be correct, and normalize in-place column by column
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                if col in extended_normalized_df.columns:
+                    col_data = extended_df[[col]].values
+                    col_norm = DataNormalizer.calculate_normalization_params(col_data, (-1, 1)) if col != 'Volume' else DataNormalizer.calculate_normalization_params(col_data, (0, 1))
+                    extended_normalized_df[col] = DataNormalizer.apply_normalization_params(col_data, col_norm).flatten()
+        else:
+            for i, column in enumerate(['Open', 'High', 'Low', 'Close']):
+                extended_normalized_df[column] = extended_normalized[:, i]
         
         if 'Volume' in extended_df.columns:
             volume_values = extended_df['Volume'].values.reshape(-1, 1)
@@ -879,32 +898,53 @@ def create_full_analysis_chart(reference_df: pd.DataFrame, window_df: pd.DataFra
 
 def create_visualizations_parallel(args: tuple):
     """Worker function for parallel visualization"""
+    import os
+    # Quick sanity test
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    test_dir = '/tmp/vis_quick_test'
+    os.makedirs(test_dir, exist_ok=True)
+    fig, ax = plt.subplots()
+    ax.plot([1,2],[1,2])
+    fig.savefig(os.path.join(test_dir, 'quick_test.png'), dpi=50)
+    plt.close(fig)
+    print(f"[VIS] Sanity test OK in {test_dir}", flush=True)
+
+    import matplotlib.dates as mdates
     target_df, result, reference_df, symbol, timeframe, reference_symbol, reference_timeframe, reference_label, visualization_dir, config = args
     
     if result is None or result["window_data"] is None:
+        print(f"[VIS] Skipping {symbol}: result or window_data is None", flush=True)
         return None
     
     # Create visualization directory if it doesn't exist
     FileManager.ensure_directories(visualization_dir)
     
     # Create full analysis visualization
-    output_path = create_full_analysis_chart(
-        reference_df,
-        result["window_data"],
-        target_df,
-        symbol,
-        reference_symbol,
-        timeframe,
-        reference_timeframe,
-        reference_label,
-        result["similarity"],
-        result["price_distance"],
-        result["diff_distance"],
-        visualization_dir,
-        config
-    )
-    
-    return {'analysis_path': output_path}
+    try:
+        output_path = create_full_analysis_chart(
+            reference_df,
+            result["window_data"],
+            target_df,
+            symbol,
+            reference_symbol,
+            timeframe,
+            reference_timeframe,
+            reference_label,
+            result["similarity"],
+            result["price_distance"],
+            result["diff_distance"],
+            visualization_dir,
+            config
+        )
+        print(f"[VIS] Saved: {output_path}")
+        return {'analysis_path': output_path}
+    except Exception as e:
+        print(f"[VIS] Error for {symbol}: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 # ================ Main Function ================
@@ -1096,9 +1136,9 @@ def main():
                         config                  # Configuration object
                     ))
                 
-                # Process visualizations in parallel
-                with Pool(processes=min(cpu_count()-1, len(visualization_arguments))) if len(visualization_arguments) > 1 else Pool(processes=1) as pool:
-                    pool.map(create_visualizations_parallel, visualization_arguments)
+                # Process visualizations in serial (11 images, multiprocessing overhead not worth it)
+                for vis_arg in visualization_arguments:
+                    create_visualizations_parallel(vis_arg)
                 
                 # Add results to summary
                 reference_summary.append("Top Results:")
