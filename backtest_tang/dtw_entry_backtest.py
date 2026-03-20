@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import pickle
 import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -19,6 +20,7 @@ EMA_LENGTH = 200
 RESULT_LINE_RE = re.compile(r"^\d+\.\s+([A-Z0-9]+)\s+\(([^)]+)\)\s*$")
 PERIOD_LINE_RE = re.compile(r"^\s*Period:\s*(.+?)\s+to\s+(.+?)\s*$")
 REFERENCE_RE = re.compile(r"^Reference:\s+([A-Z0-9]+)\s+\(([^,]+),\s*([^)]+)\)\s*$")
+REFERENCE_PERIOD_RE = re.compile(r"^Reference Period:\s*(.+?)\s+to\s+(.+?)\s*$")
 PATTERN_LENGTH_RE = re.compile(r"^Number of data points:\s*(\d+)\s*$")
 TIMEFRAME_DIR_RE = re.compile(r"^(\w+)_results$")
 
@@ -36,6 +38,9 @@ class MatchRecord:
 class TradeResult:
     symbol: str
     timeframe: str
+    trend_label: str
+    period_start: pd.Timestamp
+    period_end: pd.Timestamp
     entry_time: pd.Timestamp
     exit_time: pd.Timestamp
     entry_price: float
@@ -98,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print machine-readable JSON in addition to the table summary.",
     )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Generate one chart per evaluated trade under backtest_vis/ next to results_summary.txt.",
+    )
     return parser.parse_args()
 
 
@@ -117,7 +127,10 @@ def _parse_report_timestamp(value: str, report_timezone: str) -> pd.Timestamp:
     return ts.tz_localize(report_timezone).tz_convert("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
 
 
-def parse_summary(summary_path: Path, report_timezone: str) -> tuple[list[MatchRecord], int, str, str, str]:
+def parse_summary(
+    summary_path: Path,
+    report_timezone: str,
+) -> tuple[list[MatchRecord], int, str, str, str, pd.Timestamp, pd.Timestamp]:
     if not summary_path.exists():
         raise FileNotFoundError(f"找不到 summary 檔案：{summary_path}")
 
@@ -132,6 +145,8 @@ def parse_summary(summary_path: Path, report_timezone: str) -> tuple[list[MatchR
     reference_symbol: str | None = None
     reference_timeframe: str | None = None
     reference_label: str | None = None
+    reference_period_start: pd.Timestamp | None = None
+    reference_period_end: pd.Timestamp | None = None
     matches: list[MatchRecord] = []
 
     current_symbol: str | None = None
@@ -145,6 +160,13 @@ def parse_summary(summary_path: Path, report_timezone: str) -> tuple[list[MatchR
         ref_match = REFERENCE_RE.match(line)
         if ref_match:
             reference_symbol, reference_timeframe, reference_label = ref_match.groups()
+            continue
+
+        reference_period_match = REFERENCE_PERIOD_RE.match(line)
+        if reference_period_match:
+            start_text, end_text = reference_period_match.groups()
+            reference_period_start = _parse_report_timestamp(start_text, report_timezone)
+            reference_period_end = _parse_report_timestamp(end_text, report_timezone)
             continue
 
         pattern_match = PATTERN_LENGTH_RE.match(line)
@@ -176,8 +198,18 @@ def parse_summary(summary_path: Path, report_timezone: str) -> tuple[list[MatchR
         raise ValueError(f"summary 內找不到 Number of data points：{summary_path}")
     if reference_symbol is None or reference_timeframe is None or reference_label is None:
         raise ValueError(f"summary 內找不到 Reference 資訊：{summary_path}")
+    if reference_period_start is None or reference_period_end is None:
+        raise ValueError(f"summary 內找不到 Reference Period：{summary_path}")
 
-    return matches, pattern_length, reference_symbol, reference_timeframe, reference_label
+    return (
+        matches,
+        pattern_length,
+        reference_symbol,
+        reference_timeframe,
+        reference_label,
+        reference_period_start,
+        reference_period_end,
+    )
 
 
 def load_symbol_frame(conn: sqlite3.Connection, symbol: str, timeframe: str) -> pd.DataFrame:
@@ -198,6 +230,57 @@ def load_symbol_frame(conn: sqlite3.Connection, symbol: str, timeframe: str) -> 
     return frame
 
 
+def load_cached_reference_frame(
+    reports_dir: Path,
+    reference_symbol: str,
+    reference_timeframe: str,
+    reference_label: str,
+    reference_period_start: pd.Timestamp,
+    reference_period_end: pd.Timestamp,
+) -> pd.DataFrame:
+    start_ts = int(reference_period_start.timestamp())
+    end_ts = int(reference_period_end.timestamp())
+    cache_path = reports_dir / "reference" / (
+        f"ref_{reference_symbol}_{reference_timeframe}_{reference_label}_{start_ts}_{end_ts}.pkl"
+    )
+    if not cache_path.exists():
+        raise FileNotFoundError(f"找不到 reference cache：{cache_path}")
+
+    with cache_path.open("rb") as file:
+        cache_payload = pickle.load(file)
+
+    frame = cache_payload.get("df")
+    if frame is None or frame.empty:
+        raise ValueError(f"reference cache 無有效資料：{cache_path}")
+
+    normalized = frame.copy().reset_index().rename(
+        columns={
+            "datetime": "open_time",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+    )
+    if "open_time" not in normalized.columns or "close" not in normalized.columns:
+        raise ValueError(f"reference cache 欄位不完整：{cache_path}")
+
+    normalized["open_time"] = pd.to_datetime(normalized["open_time"], utc=True)
+    interval = normalized["open_time"].diff().dropna().median()
+    if pd.isna(interval):
+        interval = pd.Timedelta(0)
+    normalized["close_time"] = normalized["open_time"] + interval
+
+    for column in ["open", "high", "low", "close", "volume"]:
+        if column in normalized.columns:
+            normalized[column] = normalized[column].astype(float)
+        else:
+            normalized[column] = float("nan")
+
+    return normalized[["open_time", "open", "high", "low", "close", "volume", "close_time"]]
+
+
 def build_ema_frame(frame: pd.DataFrame, ema_length: int = EMA_LENGTH) -> pd.DataFrame:
     ema_frame = frame[["open_time", "close_time", "close"]].copy()
     ema_frame["ema200"] = ema_frame["close"].ewm(span=ema_length, adjust=False, min_periods=ema_length).mean()
@@ -208,6 +291,13 @@ def find_window_end_index(frame: pd.DataFrame, target_period_end: pd.Timestamp) 
     matches = frame.index[frame["open_time"] == target_period_end]
     if len(matches) == 0:
         raise ValueError(f"找不到 open_time={target_period_end} 對應 K 線")
+    return int(matches[0])
+
+
+def find_close_time_index(frame: pd.DataFrame, target_close_time: pd.Timestamp) -> int:
+    matches = frame.index[frame["close_time"] == target_close_time]
+    if len(matches) == 0:
+        raise ValueError(f"找不到 close_time={target_close_time} 對應 K 線")
     return int(matches[0])
 
 
@@ -256,6 +346,9 @@ def evaluate_match(
     return TradeResult(
         symbol=match.symbol,
         timeframe=match.timeframe,
+        trend_label=match.trend_label,
+        period_start=match.period_start,
+        period_end=match.period_end,
         entry_time=pd.Timestamp(entry_row["close_time"]),
         exit_time=pd.Timestamp(exit_row["close_time"]),
         entry_price=entry_price,
@@ -263,6 +356,101 @@ def evaluate_match(
         r_value=r_value,
         bars_forward=bars_forward,
     )
+
+
+def load_matplotlib() -> Any:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("缺少 matplotlib，請先安裝後再使用 --visualize。") from exc
+    return plt
+
+
+def sanitize_filename(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_") or "plot"
+
+
+def build_reference_window(frame: pd.DataFrame, period_start: pd.Timestamp, period_end: pd.Timestamp) -> pd.DataFrame:
+    window = frame.loc[(frame["open_time"] >= period_start) & (frame["open_time"] <= period_end)].copy()
+    if window.empty:
+        raise ValueError(f"Reference 區間無資料：{period_start} ~ {period_end}")
+    return window.reset_index(drop=True)
+
+
+def build_trade_window(frame: pd.DataFrame, trade: TradeResult) -> tuple[pd.DataFrame, int, int]:
+    start_index = find_window_end_index(frame, trade.period_start)
+    entry_index = find_window_end_index(frame, trade.period_end)
+    exit_index = find_close_time_index(frame, trade.exit_time)
+    window = frame.iloc[start_index : exit_index + 1].copy().reset_index(drop=True)
+    return window, entry_index - start_index, exit_index - start_index
+
+
+def visualize_trades(
+    summary_path: Path,
+    reference_symbol: str,
+    reference_timeframe: str,
+    reference_period_start: pd.Timestamp,
+    reference_period_end: pd.Timestamp,
+    reference_frame: pd.DataFrame,
+    symbol_frames: dict[tuple[str, str], pd.DataFrame],
+    trades: list[TradeResult],
+    symbol_suffix: str,
+) -> int:
+    plt = load_matplotlib()
+    output_dir = summary_path.parent / "backtest_vis"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    reference_window = build_reference_window(reference_frame, reference_period_start, reference_period_end)
+    reference_entry_index = len(reference_window) - 1
+    reference_entry_price = float(reference_window.iloc[reference_entry_index]["close"])
+    generated = 0
+
+    for index, trade in enumerate(trades, start=1):
+        db_symbol = trade.symbol if trade.symbol.endswith(symbol_suffix) else f"{trade.symbol}{symbol_suffix}"
+        frame = symbol_frames[(db_symbol, trade.timeframe)]
+        trade_window, entry_offset, exit_offset = build_trade_window(frame, trade)
+
+        fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=False)
+
+        axes[0].plot(reference_window.index, reference_window["close"], color="tab:blue", linewidth=1.5)
+        axes[0].scatter(
+            [reference_entry_index],
+            [reference_entry_price],
+            color="red",
+            s=60,
+            label="Reference Entry",
+            zorder=3,
+        )
+        axes[0].set_title(f"Reference: {reference_symbol} ({reference_timeframe})")
+        axes[0].set_ylabel("Close")
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend(loc="best")
+
+        axes[1].plot(trade_window.index, trade_window["close"], color="tab:green", linewidth=1.5)
+        axes[1].scatter([entry_offset], [trade.entry_price], color="orange", s=60, label="Entry", zorder=3)
+        axes[1].scatter([exit_offset], [trade.exit_price], color="red", s=60, label="Exit", zorder=3)
+        axes[1].set_title(f"Trade: {trade.symbol} ({trade.timeframe}, {trade.trend_label})")
+        axes[1].set_xlabel("Bars")
+        axes[1].set_ylabel("Close")
+        axes[1].grid(True, alpha=0.3)
+        axes[1].legend(loc="best")
+
+        outcome = "WIN" if trade.r_value > 0 else "LOSS" if trade.r_value < 0 else "FLAT"
+        fig.suptitle(f"{trade.symbol} | R={trade.r_value:.4f} | {outcome}", fontsize=14, fontweight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+        filename = (
+            f"{index:03d}_{sanitize_filename(trade.symbol)}_{sanitize_filename(trade.timeframe)}_"
+            f"{trade.entry_time.strftime('%Y%m%dT%H%M%SZ')}_{outcome}.png"
+        )
+        fig.savefig(output_dir / filename, dpi=150)
+        plt.close(fig)
+        generated += 1
+
+    return generated
 
 
 def summarize_trade_results(trades: Iterable[TradeResult]) -> dict:
@@ -334,7 +522,15 @@ def print_report(
 def main() -> None:
     args = parse_args()
     summary_path = resolve_summary_path(args)
-    matches, pattern_length, reference_symbol, reference_timeframe, reference_label = parse_summary(
+    (
+        matches,
+        pattern_length,
+        reference_symbol,
+        reference_timeframe,
+        reference_label,
+        reference_period_start,
+        reference_period_end,
+    ) = parse_summary(
         summary_path,
         report_timezone=args.report_timezone,
     )
@@ -347,8 +543,23 @@ def main() -> None:
     ema_frames_by_symbol: dict[str, dict[str, pd.DataFrame]] = {}
     trades: list[TradeResult] = []
     skipped_matches = 0
+    reference_db_symbol = reference_symbol if reference_symbol.endswith(args.symbol_suffix) else f"{reference_symbol}{args.symbol_suffix}"
 
     try:
+        if args.visualize:
+            reference_frame_key = (reference_db_symbol, reference_timeframe)
+            try:
+                symbol_frames[reference_frame_key] = load_cached_reference_frame(
+                    reports_dir=args.reports_dir.expanduser().resolve(),
+                    reference_symbol=reference_symbol,
+                    reference_timeframe=reference_timeframe,
+                    reference_label=reference_label,
+                    reference_period_start=reference_period_start,
+                    reference_period_end=reference_period_end,
+                )
+            except (FileNotFoundError, ValueError):
+                symbol_frames[reference_frame_key] = load_symbol_frame(conn, reference_db_symbol, reference_timeframe)
+
         for match in matches:
             db_symbol = match.symbol if match.symbol.endswith(args.symbol_suffix) else f"{match.symbol}{args.symbol_suffix}"
             frame_key = (db_symbol, match.timeframe)
@@ -378,6 +589,20 @@ def main() -> None:
     finally:
         conn.close()
 
+    generated_visualizations = 0
+    if args.visualize and trades:
+        generated_visualizations = visualize_trades(
+            summary_path=summary_path,
+            reference_symbol=reference_symbol,
+            reference_timeframe=reference_timeframe,
+            reference_period_start=reference_period_start,
+            reference_period_end=reference_period_end,
+            reference_frame=symbol_frames[(reference_db_symbol, reference_timeframe)],
+            symbol_frames=symbol_frames,
+            trades=trades,
+            symbol_suffix=args.symbol_suffix,
+        )
+
     print_report(
         summary_path=summary_path,
         reference_symbol=reference_symbol,
@@ -390,6 +615,9 @@ def main() -> None:
         trades=trades,
         ema200_filter_enabled=args.ema200_filter,
     )
+
+    if args.visualize:
+        print(f"Visualization: {generated_visualizations} chart(s) -> {summary_path.parent / 'backtest_vis'}")
 
     if args.json:
         metrics = summarize_trade_results(trades)
@@ -404,6 +632,8 @@ def main() -> None:
             "extension_factor": args.extension_factor,
             "exit_bars": int(pattern_length * args.extension_factor),
             "ema200_filter": args.ema200_filter,
+            "visualize": args.visualize,
+            "generated_visualizations": generated_visualizations,
             "total_matches": len(matches),
             "evaluated_matches": len(trades),
             "skipped_matches": skipped_matches,
