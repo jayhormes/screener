@@ -7,7 +7,7 @@
     },
     "discord_trend_finder": {
         "webhook_url": "https://discord.com/api/webhooks/1000087412770357268/cc3eBOI_b8DDU7lUa2_AMAITNpPGa0qMzlLER69GxlOBy9IS-CqOG3piLfk1c7dd7WSh",
-        "enabled": true,
+        "enabled": false,
         "send_detailed_results": true,
         "send_overall_summary": true,
         "max_results_per_message": 10,
