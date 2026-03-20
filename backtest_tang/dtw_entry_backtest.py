@@ -388,6 +388,13 @@ def build_trade_window(frame: pd.DataFrame, trade: TradeResult) -> tuple[pd.Data
     return window, entry_index - start_index, exit_index - start_index
 
 
+def add_sma_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    sma_frame = frame.copy()
+    for length in (30, 45, 60):
+        sma_frame[f"sma{length}"] = sma_frame["close"].rolling(window=length, min_periods=length).mean()
+    return sma_frame
+
+
 def visualize_trades(
     summary_path: Path,
     reference_symbol: str,
@@ -403,7 +410,7 @@ def visualize_trades(
     output_dir = summary_path.parent / "backtest_vis"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    reference_window = build_reference_window(reference_frame, reference_period_start, reference_period_end)
+    reference_window = add_sma_columns(build_reference_window(reference_frame, reference_period_start, reference_period_end))
     reference_entry_index = len(reference_window) - 1
     reference_entry_price = float(reference_window.iloc[reference_entry_index]["close"])
     generated = 0
@@ -412,10 +419,20 @@ def visualize_trades(
         db_symbol = trade.symbol if trade.symbol.endswith(symbol_suffix) else f"{trade.symbol}{symbol_suffix}"
         frame = symbol_frames[(db_symbol, trade.timeframe)]
         trade_window, entry_offset, exit_offset = build_trade_window(frame, trade)
+        trade_window = add_sma_columns(trade_window)
 
-        fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=False)
+        fig, axes = plt.subplots(
+            3,
+            1,
+            figsize=(14, 10),
+            sharex=False,
+            gridspec_kw={"height_ratios": [1.0, 1.0, 0.6]},
+        )
 
         axes[0].plot(reference_window.index, reference_window["close"], color="tab:blue", linewidth=1.5)
+        axes[0].plot(reference_window.index, reference_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
+        axes[0].plot(reference_window.index, reference_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
+        axes[0].plot(reference_window.index, reference_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
         axes[0].scatter(
             [reference_entry_index],
             [reference_entry_price],
@@ -430,13 +447,22 @@ def visualize_trades(
         axes[0].legend(loc="best")
 
         axes[1].plot(trade_window.index, trade_window["close"], color="tab:green", linewidth=1.5)
+        axes[1].plot(trade_window.index, trade_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
+        axes[1].plot(trade_window.index, trade_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
+        axes[1].plot(trade_window.index, trade_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
         axes[1].scatter([entry_offset], [trade.entry_price], color="orange", s=60, label="Entry", zorder=3)
         axes[1].scatter([exit_offset], [trade.exit_price], color="red", s=60, label="Exit", zorder=3)
         axes[1].set_title(f"Trade: {trade.symbol} ({trade.timeframe}, {trade.trend_label})")
-        axes[1].set_xlabel("Bars")
         axes[1].set_ylabel("Close")
         axes[1].grid(True, alpha=0.3)
         axes[1].legend(loc="best")
+
+        volume_colors = ["green" if close >= open_ else "red" for open_, close in zip(trade_window["open"], trade_window["close"])]
+        axes[2].bar(trade_window.index, trade_window["volume"], color=volume_colors, width=0.8)
+        axes[2].set_title("Volume")
+        axes[2].set_xlabel("Bars")
+        axes[2].set_ylabel("Volume")
+        axes[2].grid(True, axis="y", alpha=0.3)
 
         outcome = "WIN" if trade.r_value > 0 else "LOSS" if trade.r_value < 0 else "FLAT"
         fig.suptitle(f"{trade.symbol} | R={trade.r_value:.4f} | {outcome}", fontsize=14, fontweight="bold")
