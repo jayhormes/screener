@@ -265,7 +265,8 @@ def load_cached_reference_frame(
             "Volume": "volume",
         }
     )
-    if "open_time" not in normalized.columns or "close" not in normalized.columns:
+    required_columns = {"open_time", "open", "high", "low", "close"}
+    if not required_columns.issubset(normalized.columns):
         raise ValueError(f"reference cache 欄位不完整：{cache_path}")
 
     normalized["open_time"] = pd.to_datetime(normalized["open_time"], utc=True)
@@ -277,8 +278,13 @@ def load_cached_reference_frame(
     for column in ["open", "high", "low", "close", "volume"]:
         if column in normalized.columns:
             normalized[column] = normalized[column].astype(float)
+        elif column == "volume":
+            normalized[column] = 0.0
         else:
-            normalized[column] = float("nan")
+            raise ValueError(f"reference cache 缺少 {column} 欄位：{cache_path}")
+
+    if normalized[["open", "high", "low", "close"]].isna().any().any():
+        raise ValueError(f"reference cache OHLC 含有缺值：{cache_path}")
 
     return normalized[["open_time", "open", "high", "low", "close", "volume", "close_time"]]
 
@@ -421,6 +427,60 @@ def configure_datetime_axis(axis: Any, datetimes: pd.Series, xlabel: str | None 
         axis.set_xlabel(xlabel)
 
 
+def compute_candlestick_width(datetimes: pd.Series) -> float:
+    if len(datetimes) <= 1:
+        return 1 / 1440
+
+    diffs = datetimes.diff().dropna()
+    if diffs.empty:
+        return 1 / 1440
+
+    width = diffs.median().total_seconds() / 86400 * 0.7
+    return max(width, 1 / 1440)
+
+
+def draw_candlesticks(axis: Any, datetimes: pd.Series, frame: pd.DataFrame) -> float:
+    import matplotlib.dates as mdates
+    from matplotlib.patches import Rectangle
+
+    bullish_color = "#22c55e"
+    bearish_color = "#ef4444"
+    candle_width = compute_candlestick_width(datetimes)
+    half_width = candle_width / 2
+    x_values = mdates.date2num(datetimes.dt.to_pydatetime())
+
+    for x_value, (_, row) in zip(x_values, frame.iterrows()):
+        open_price = float(row["open"])
+        high_price = float(row["high"])
+        low_price = float(row["low"])
+        close_price = float(row["close"])
+        color = bullish_color if close_price >= open_price else bearish_color
+
+        axis.vlines(x_value, low_price, high_price, color=color, linewidth=1.0, zorder=2)
+
+        body_bottom = min(open_price, close_price)
+        body_height = abs(close_price - open_price)
+        if body_height == 0:
+            axis.hlines(open_price, x_value - half_width, x_value + half_width, color=color, linewidth=1.2, zorder=3)
+            continue
+
+        axis.add_patch(
+            Rectangle(
+                (x_value - half_width, body_bottom),
+                candle_width,
+                body_height,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=1.0,
+                zorder=3,
+            )
+        )
+
+    axis.set_xlim(x_values[0] - candle_width, x_values[-1] + candle_width)
+    axis.xaxis_date()
+    return candle_width
+
+
 def visualize_trades(
     summary_path: Path,
     reference_symbol: str,
@@ -442,13 +502,13 @@ def visualize_trades(
     generated = 0
 
     reference_datetimes = build_chart_datetimes(reference_window)
-
     for index, trade in enumerate(trades, start=1):
         db_symbol = trade.symbol if trade.symbol.endswith(symbol_suffix) else f"{trade.symbol}{symbol_suffix}"
         frame = symbol_frames[(db_symbol, trade.timeframe)]
         trade_window, entry_offset, exit_offset = build_trade_window(frame, trade)
         trade_window = add_sma_columns(trade_window)
         trade_datetimes = build_chart_datetimes(trade_window)
+        trade_candle_width = compute_candlestick_width(trade_datetimes)
 
         fig, axes = plt.subplots(
             3,
@@ -458,7 +518,7 @@ def visualize_trades(
             gridspec_kw={"height_ratios": [1.0, 1.0, 0.6]},
         )
 
-        axes[0].plot(reference_datetimes, reference_window["close"], color="tab:blue", linewidth=1.5)
+        draw_candlesticks(axes[0], reference_datetimes, reference_window)
         axes[0].plot(reference_datetimes, reference_window["sma30"], color="#38BDF8", linewidth=1.2, label="SMA30")
         axes[0].plot(reference_datetimes, reference_window["sma45"], color="#818CF8", linewidth=1.2, label="SMA45")
         axes[0].plot(reference_datetimes, reference_window["sma60"], color="#C084FC", linewidth=1.2, label="SMA60")
@@ -471,18 +531,34 @@ def visualize_trades(
             zorder=3,
         )
         axes[0].set_title(f"Reference: {reference_symbol} ({reference_timeframe})")
-        axes[0].set_ylabel("Close")
+        axes[0].set_ylabel("Price")
         axes[0].grid(True, alpha=0.3)
         axes[0].legend(loc="best")
 
         stop_loss_price = trade.entry_price - (trade.entry_price * abs(trade.r_value))
 
-        axes[1].plot(trade_datetimes, trade_window["close"], color="tab:green", linewidth=1.5)
+        draw_candlesticks(axes[1], trade_datetimes, trade_window)
         axes[1].plot(trade_datetimes, trade_window["sma30"], color="#38BDF8", linewidth=1.2, label="SMA30")
         axes[1].plot(trade_datetimes, trade_window["sma45"], color="#818CF8", linewidth=1.2, label="SMA45")
         axes[1].plot(trade_datetimes, trade_window["sma60"], color="#C084FC", linewidth=1.2, label="SMA60")
-        axes[1].scatter([trade_datetimes.iloc[entry_offset]], [trade.entry_price], color="orange", s=60, label="Entry", zorder=3)
-        axes[1].scatter([trade_datetimes.iloc[exit_offset]], [trade.exit_price], color="red", s=60, label="Exit", zorder=3)
+        axes[1].scatter(
+            [trade_datetimes.iloc[entry_offset]],
+            [trade.entry_price],
+            color="orange",
+            marker="^",
+            s=90,
+            label="Entry",
+            zorder=4,
+        )
+        axes[1].scatter(
+            [trade_datetimes.iloc[exit_offset]],
+            [trade.exit_price],
+            color="red",
+            marker="v",
+            s=90,
+            label="Exit",
+            zorder=4,
+        )
         axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="SL -1R")
         axes[1].annotate(
             "SL -1R",
@@ -495,16 +571,17 @@ def visualize_trades(
             va="bottom",
         )
         axes[1].set_title(f"Trade: {trade.symbol} ({trade.timeframe}, {trade.trend_label})")
-        axes[1].set_ylabel("Close")
+        axes[1].set_ylabel("Price")
         axes[1].grid(True, alpha=0.3)
         axes[1].legend(loc="best")
 
-        volume_colors = ["green" if close >= open_ else "red" for open_, close in zip(trade_window["open"], trade_window["close"])]
-        axes[2].bar(trade_datetimes, trade_window["volume"], color=volume_colors, width=0.02)
+        volume_colors = ["#22c55e" if close >= open_ else "#ef4444" for open_, close in zip(trade_window["open"], trade_window["close"])]
+        axes[2].bar(trade_datetimes, trade_window["volume"], color=volume_colors, width=trade_candle_width)
         axes[2].set_title("Volume")
         axes[2].set_xlabel("Datetime (GMT+8)")
         axes[2].set_ylabel("Volume")
         axes[2].grid(True, axis="y", alpha=0.3)
+        axes[2].set_xlim(trade_datetimes.iloc[0], trade_datetimes.iloc[-1] + pd.Timedelta(days=trade_candle_width))
 
         configure_datetime_axis(axes[0], reference_datetimes, xlabel="Datetime (GMT+8)")
         configure_datetime_axis(axes[1], trade_datetimes, xlabel="Datetime (GMT+8)")
