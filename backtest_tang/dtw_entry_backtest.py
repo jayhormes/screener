@@ -587,18 +587,6 @@ def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
                 context.last_breakout_swing_low_idx = context.last_confirmed_swing_low_idx
 
         close = row["close"]
-        atr = row["atr"]
-        if pd.isna(atr) or float(atr) <= 0 or pd.isna(close) or float(close) <= 0:
-            stage_series[index] = None
-            anchor_series[index] = None
-            stop_pct_series[index] = None
-            continue
-
-        atr_ratio = min(float(atr) / float(close), ATR_CAP_RATIO)
-        gap_threshold = atr_ratio * GAP_ATR_MULTIPLE
-        slope_threshold = atr_ratio * SLOPE_ATR_MULTIPLE
-        touch_threshold = atr_ratio * TOUCH_ATR_MULTIPLE
-        breakout_threshold = atr_ratio * BREAKOUT_ATR_MULTIPLE
 
         if pd.notna(prev_sma30) and pd.notna(prev_sma60) and prev_sma30 >= prev_sma60 and sma30 < sma60:
             context.last_bear_cross_idx = index
@@ -613,13 +601,30 @@ def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
             context.current_stage = 0
             context.first_cross_up_done = True
 
+        atr = row["atr"]
+        atr_valid = not (pd.isna(atr) or float(atr) <= 0 or pd.isna(close) or float(close) <= 0)
+        if atr_valid:
+            atr_ratio = min(float(atr) / float(close), ATR_CAP_RATIO)
+            gap_threshold = atr_ratio * GAP_ATR_MULTIPLE
+            slope_threshold = atr_ratio * SLOPE_ATR_MULTIPLE
+            touch_threshold = atr_ratio * TOUCH_ATR_MULTIPLE
+            breakout_threshold = atr_ratio * BREAKOUT_ATR_MULTIPLE
+        else:
+            gap_threshold = None
+            slope_threshold = None
+            touch_threshold = None
+            breakout_threshold = None
+
         ma_gap = abs(sma30 - sma60) if pd.notna(sma30) and pd.notna(sma60) else None
         sma30_slope = abs(sma30 - prev_sma30) if pd.notna(sma30) and pd.notna(prev_sma30) else None
         sma60_slope = abs(sma60 - prev_sma60) if pd.notna(sma60) and pd.notna(prev_sma60) else None
         in_convergence = (
-            ma_gap is not None
+            atr_valid
+            and ma_gap is not None
             and sma30_slope is not None
             and sma60_slope is not None
+            and gap_threshold is not None
+            and slope_threshold is not None
             and ma_gap <= gap_threshold
             and sma30_slope <= slope_threshold
             and sma60_slope <= slope_threshold
@@ -645,15 +650,18 @@ def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
 
         breakout_swing_high = context.last_confirmed_swing_high_idx
         if (
-            breakout_swing_high is not None
+            atr_valid
+            and breakout_swing_high is not None
             and context.last_breakout_swing_low_idx is not None
             and breakout_swing_high > context.last_breakout_swing_low_idx
             and pd.notna(sma30)
             and pd.notna(sma60)
             and sma30 > sma60
             and ma_gap is not None
+            and gap_threshold is not None
             and ma_gap > gap_threshold
             and prev_sma30 is not None
+            and breakout_threshold is not None
             and (sma30 - prev_sma30) >= 0
         ):
             swing_high_price = float(frame.iloc[breakout_swing_high]["high"])
