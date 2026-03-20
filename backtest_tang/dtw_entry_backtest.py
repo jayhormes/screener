@@ -5,10 +5,11 @@ import pickle
 import re
 import sqlite3
 from dataclasses import dataclass
+import json
 from datetime import timezone, timedelta
 from pathlib import Path
 from statistics import median
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 
@@ -20,11 +21,64 @@ EMA_FILTER_TIMEFRAMES = ("30m", "4h")
 EMA_LENGTH = 200
 CHART_TIMEZONE = timezone(timedelta(hours=8), name="GMT+8")
 SWING_LOOKBACK = 5
-GAP_THRESHOLD = 0.005
-SLOPE_THRESHOLD = 0.003
-TOUCH_TOLERANCE = 0.005
+GAP_ATR_MULTIPLE = 0.5
+SLOPE_ATR_MULTIPLE = 0.2
+TOUCH_ATR_MULTIPLE = 0.3
 ATR_PERIOD = 14
-BREAKOUT_BUFFER = 0.002
+BREAKOUT_ATR_MULTIPLE = 0.25
+ATR_CAP_RATIO = 0.10
+DEFAULT_ATR_STOP_MULTIPLE = 1.5
+DEFAULT_MAX_ABRUPTNESS = 1.8
+
+
+@dataclass(frozen=True)
+class ReferenceProfile:
+    key: str
+    description: str
+    matcher: Callable[[str], bool]
+    expected_stage: int | None = None
+
+
+REFERENCE_PROFILES: tuple[ReferenceProfile, ...] = (
+    ReferenceProfile(
+        key="all",
+        description="全部 reference",
+        matcher=lambda _folder_name: True,
+    ),
+    ReferenceProfile(
+        key="stage_refs",
+        description="位階 reference（stage_0/1/2）",
+        matcher=lambda folder_name: bool(re.search(r"(?:^|_)stage_[0-2](?:_|$)", folder_name)),
+    ),
+    ReferenceProfile(
+        key="stage_0",
+        description="位階 0 reference",
+        matcher=lambda folder_name: "stage_0" in folder_name,
+        expected_stage=0,
+    ),
+    ReferenceProfile(
+        key="stage_1",
+        description="位階 1 reference",
+        matcher=lambda folder_name: "stage_1" in folder_name,
+        expected_stage=1,
+    ),
+    ReferenceProfile(
+        key="stage_2",
+        description="位階 2 reference",
+        matcher=lambda folder_name: "stage_2" in folder_name,
+        expected_stage=2,
+    ),
+    ReferenceProfile(
+        key="standard",
+        description="標準均線走勢 reference（如 AVAX_1h_standard）",
+        matcher=lambda folder_name: "_standard" in folder_name,
+    ),
+    ReferenceProfile(
+        key="uptrend",
+        description="上升趨勢 reference（如 CRV_4h_uptrend / uptrend_2）",
+        matcher=lambda folder_name: "_uptrend" in folder_name,
+    ),
+)
 
 RESULT_LINE_RE = re.compile(r"^\d+\.\s+([A-Z0-9]+)\s+\(([^)]+)\)\s*$")
 PERIOD_LINE_RE = re.compile(r"^\s*Period:\s*(.+?)\s+to\s+(.+?)\s*$")
@@ -32,6 +86,12 @@ REFERENCE_RE = re.compile(r"^Reference:\s+([A-Z0-9]+)\s+\(([^,]+),\s*([^)]+)\)\s
 REFERENCE_PERIOD_RE = re.compile(r"^Reference Period:\s*(.+?)\s+to\s+(.+?)\s*$")
 PATTERN_LENGTH_RE = re.compile(r"^Number of data points:\s*(\d+)\s*$")
 TIMEFRAME_DIR_RE = re.compile(r"^(\w+)_results$")
+
+
+@dataclass(frozen=True)
+class SummaryJob:
+    summary_path: Path
+    reference_selector: str
 
 
 @dataclass(frozen=True)
@@ -48,6 +108,8 @@ class TradeResult:
     symbol: str
     timeframe: str
     trend_label: str
+    reference_label: str
+    reference_selector: str
     period_start: pd.Timestamp
     period_end: pd.Timestamp
     entry_time: pd.Timestamp
@@ -57,8 +119,10 @@ class TradeResult:
     r_value: float
     bars_forward: int
     stage: int | None
-    stage_stop_anchor: float | None
-    stage_stop_pct: float | None
+    abruptness: float | None
+    stop_loss_price: float | None
+    stop_loss_pct: float | None
+    stop_hit: bool
 
 
 @dataclass
@@ -89,7 +153,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to one historical_trend_finder_reports run directory, e.g. historical_trend_finder_reports/20260320_155420",
     )
     parser.add_argument("--timeframe", help="Target timeframe folder, e.g. 1h")
-    parser.add_argument("--reference", help="Reference folder name, e.g. AVAX_1h_standard")
+    parser.add_argument("--reference", help="Reference folder name, alias, comma list, or all; e.g. AVAX_1h_standard / standard / CRV_4h_uptrend_2 / all")
     parser.add_argument(
         "--reports-dir",
         type=Path,
@@ -124,6 +188,28 @@ def parse_args() -> argparse.Namespace:
         help="Require both 30m and 4h close prices to be above EMA200 at entry time.",
     )
     parser.add_argument(
+        "--atr-stop-multiple",
+        type=float,
+        default=DEFAULT_ATR_STOP_MULTIPLE,
+        help=f"Stop loss = entry_price - ATR * multiple. Default: {DEFAULT_ATR_STOP_MULTIPLE}",
+    )
+    parser.add_argument(
+        "--max-abruptness",
+        type=float,
+        default=DEFAULT_MAX_ABRUPTNESS,
+        help=f"Maximum allowed entry abruptness (true range / ATR). Default: {DEFAULT_MAX_ABRUPTNESS}",
+    )
+    parser.add_argument(
+        "--disable-stage-confirm",
+        action="store_true",
+        help="Disable reference stage confirmation when using stage_* references.",
+    )
+    parser.add_argument(
+        "--list-reference-profiles",
+        action="store_true",
+        help="List built-in reference selectors and exit.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON in addition to the table summary.",
@@ -136,15 +222,64 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_summary_path(args: argparse.Namespace) -> Path:
+def list_reference_profiles() -> None:
+    print("Built-in reference selectors:")
+    for profile in REFERENCE_PROFILES:
+        expected_stage = f" | expected_stage={profile.expected_stage}" if profile.expected_stage is not None else ""
+        print(f"- {profile.key:<10} : {profile.description}{expected_stage}")
+
+
+def get_reference_profile(selector: str) -> ReferenceProfile | None:
+    normalized = selector.strip()
+    for profile in REFERENCE_PROFILES:
+        if profile.key == normalized:
+            return profile
+    return None
+
+
+def resolve_summary_jobs(args: argparse.Namespace) -> list[SummaryJob]:
     if args.summary:
-        return args.summary.expanduser().resolve()
+        return [SummaryJob(summary_path=args.summary.expanduser().resolve(), reference_selector="direct")]
 
     if not args.run_dir or not args.timeframe or not args.reference:
         raise ValueError("請提供 --summary，或同時提供 --run-dir --timeframe --reference。")
 
     run_dir = args.run_dir.expanduser().resolve()
-    return run_dir / f"{args.timeframe}_results" / args.reference / "results_summary.txt"
+    timeframe_dir = run_dir / f"{args.timeframe}_results"
+    if not timeframe_dir.exists():
+        raise FileNotFoundError(f"找不到 timeframe 目錄：{timeframe_dir}")
+
+    selectors = [item.strip() for item in str(args.reference).split(",") if item.strip()]
+    if not selectors:
+        raise ValueError("--reference 不可為空")
+
+    jobs: list[SummaryJob] = []
+    seen_paths: set[Path] = set()
+    for selector in selectors:
+        profile = get_reference_profile(selector)
+        if profile is None:
+            summary_path = timeframe_dir / selector / "results_summary.txt"
+            if not summary_path.exists():
+                raise FileNotFoundError(f"找不到 reference summary：{summary_path}")
+            resolved = summary_path.resolve()
+            if resolved not in seen_paths:
+                jobs.append(SummaryJob(summary_path=resolved, reference_selector=selector))
+                seen_paths.add(resolved)
+            continue
+
+        for summary_path in sorted(timeframe_dir.glob("*/results_summary.txt")):
+            folder_name = summary_path.parent.name
+            if not profile.matcher(folder_name):
+                continue
+            resolved = summary_path.resolve()
+            if resolved in seen_paths:
+                continue
+            jobs.append(SummaryJob(summary_path=resolved, reference_selector=selector))
+            seen_paths.add(resolved)
+
+    if not jobs:
+        raise ValueError(f"找不到符合條件的 reference summary：timeframe={args.timeframe}, selector={args.reference}")
+    return jobs
 
 
 def _parse_report_timestamp(value: str, report_timezone: str) -> pd.Timestamp:
@@ -337,6 +472,46 @@ def add_stage_features(frame: pd.DataFrame) -> pd.DataFrame:
     return stage_frame
 
 
+def infer_expected_stage(reference_label: str, reference_selector: str) -> int | None:
+    profile = get_reference_profile(reference_selector)
+    if profile is not None and profile.expected_stage is not None:
+        return profile.expected_stage
+    matched = re.search(r"(?:^|_)stage_([0-2])(?:_|$)", reference_label)
+    return int(matched.group(1)) if matched else None
+
+
+def compute_abruptness(row: pd.Series) -> float | None:
+    atr = row.get("atr")
+    if pd.isna(atr) or atr is None or float(atr) <= 0:
+        return None
+    true_range = float(row["high"]) - float(row["low"])
+    return true_range / float(atr)
+
+
+def compute_atr_stop_loss(entry_row: pd.Series, atr_stop_multiple: float) -> tuple[float | None, float | None]:
+    atr = entry_row.get("atr")
+    if pd.isna(atr) or atr is None or float(atr) <= 0:
+        return None, None
+    entry_price = float(entry_row["close"])
+    stop_loss_price = entry_price - (float(atr) * atr_stop_multiple)
+    stop_loss_pct = (entry_price - stop_loss_price) / entry_price if entry_price else None
+    return stop_loss_price, stop_loss_pct
+
+
+def find_exit_with_atr_stop(frame: pd.DataFrame, entry_index: int, exit_index: int, stop_loss_price: float | None) -> tuple[int, float, bool]:
+    if stop_loss_price is None:
+        exit_row = frame.iloc[exit_index]
+        return exit_index, float(exit_row["close"]), False
+
+    for current_index in range(entry_index + 1, exit_index + 1):
+        row = frame.iloc[current_index]
+        if float(row["low"]) <= stop_loss_price:
+            return current_index, stop_loss_price, True
+
+    exit_row = frame.iloc[exit_index]
+    return exit_index, float(exit_row["close"]), False
+
+
 def find_window_end_index(frame: pd.DataFrame, target_period_end: pd.Timestamp) -> int:
     matches = frame.index[frame["open_time"] == target_period_end]
     if len(matches) == 0:
@@ -411,6 +586,20 @@ def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
                 context.last_confirmed_swing_high_idx = confirm_idx
                 context.last_breakout_swing_low_idx = context.last_confirmed_swing_low_idx
 
+        close = row["close"]
+        atr = row["atr"]
+        if pd.isna(atr) or float(atr) <= 0 or pd.isna(close) or float(close) <= 0:
+            stage_series[index] = None
+            anchor_series[index] = None
+            stop_pct_series[index] = None
+            continue
+
+        atr_ratio = min(float(atr) / float(close), ATR_CAP_RATIO)
+        gap_threshold = atr_ratio * GAP_ATR_MULTIPLE
+        slope_threshold = atr_ratio * SLOPE_ATR_MULTIPLE
+        touch_threshold = atr_ratio * TOUCH_ATR_MULTIPLE
+        breakout_threshold = atr_ratio * BREAKOUT_ATR_MULTIPLE
+
         if pd.notna(prev_sma30) and pd.notna(prev_sma60) and prev_sma30 >= prev_sma60 and sma30 < sma60:
             context.last_bear_cross_idx = index
             context.first_cross_up_done = False
@@ -424,16 +613,16 @@ def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
             context.current_stage = 0
             context.first_cross_up_done = True
 
-        ma_gap_ratio = abs(sma30 - sma60) / sma60 if pd.notna(sma30) and pd.notna(sma60) and sma60 else None
-        sma30_slope = abs((sma30 - prev_sma30) / prev_sma30) if pd.notna(sma30) and pd.notna(prev_sma30) and prev_sma30 else None
-        sma60_slope = abs((sma60 - prev_sma60) / prev_sma60) if pd.notna(sma60) and pd.notna(prev_sma60) and prev_sma60 else None
+        ma_gap = abs(sma30 - sma60) if pd.notna(sma30) and pd.notna(sma60) else None
+        sma30_slope = abs(sma30 - prev_sma30) if pd.notna(sma30) and pd.notna(prev_sma30) else None
+        sma60_slope = abs(sma60 - prev_sma60) if pd.notna(sma60) and pd.notna(prev_sma60) else None
         in_convergence = (
-            ma_gap_ratio is not None
+            ma_gap is not None
             and sma30_slope is not None
             and sma60_slope is not None
-            and ma_gap_ratio <= GAP_THRESHOLD
-            and sma30_slope <= SLOPE_THRESHOLD
-            and sma60_slope <= SLOPE_THRESHOLD
+            and ma_gap <= gap_threshold
+            and sma30_slope <= slope_threshold
+            and sma60_slope <= slope_threshold
         )
 
         if in_convergence:
@@ -442,7 +631,7 @@ def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
                 context.ma30_test_count = 0
                 context.last_test_touch_idx = None
 
-            ma30_touch = abs(row["low"] - sma30) / sma30 <= TOUCH_TOLERANCE if sma30 else False
+            ma30_touch = abs(row["low"] - sma30) <= touch_threshold if pd.notna(sma30) else False
             if ma30_touch and context.last_test_touch_idx != index - 1:
                 context.ma30_test_count += 1
                 context.last_test_touch_idx = index
@@ -462,15 +651,13 @@ def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
             and pd.notna(sma30)
             and pd.notna(sma60)
             and sma30 > sma60
-            and ma_gap_ratio is not None
-            and ma_gap_ratio > GAP_THRESHOLD
+            and ma_gap is not None
+            and ma_gap > gap_threshold
             and prev_sma30 is not None
-            and prev_sma30 != 0
-            and ((sma30 - prev_sma30) / prev_sma30) >= 0
+            and (sma30 - prev_sma30) >= 0
         ):
             swing_high_price = float(frame.iloc[breakout_swing_high]["high"])
-            breakout_buffer = max(swing_high_price * BREAKOUT_BUFFER, float(row["atr"]) * BREAKOUT_BUFFER if pd.notna(row["atr"]) else 0.0)
-            if row["close"] > swing_high_price + breakout_buffer:
+            if row["close"] > swing_high_price + breakout_threshold:
                 context.current_stage = 2
 
         stage = context.current_stage
@@ -503,6 +690,11 @@ def evaluate_match(
     match: MatchRecord,
     pattern_length: int,
     extension_factor: float,
+    reference_label: str,
+    reference_selector: str,
+    atr_stop_multiple: float,
+    max_abruptness: float,
+    stage_confirm_enabled: bool,
     ema_frames: dict[str, pd.DataFrame] | None = None,
 ) -> TradeResult | None:
     bars_forward = int(pattern_length * extension_factor)
@@ -510,26 +702,36 @@ def evaluate_match(
         raise ValueError(f"extension_factor 太小，導致 bars_forward={bars_forward}")
 
     end_index = find_window_end_index(frame, match.period_end)
-    exit_index = end_index + bars_forward
-    if exit_index >= len(frame):
+    planned_exit_index = end_index + bars_forward
+    if planned_exit_index >= len(frame):
         return None
 
     entry_row = frame.iloc[end_index]
     if ema_frames is not None and not passes_ema200_filter(ema_frames, pd.Timestamp(entry_row["close_time"])):
         return None
 
-    exit_row = frame.iloc[exit_index]
-    entry_price = float(entry_row["close"])
-    exit_price = float(exit_row["close"])
-    r_value = (exit_price - entry_price) / entry_price
     stage = entry_row.get("stage")
-    stage_stop_anchor = entry_row.get("stage_stop_anchor")
-    stage_stop_pct = entry_row.get("stage_stop_pct")
+    normalized_stage = None if pd.isna(stage) else int(stage)
+    expected_stage = infer_expected_stage(reference_label, reference_selector)
+    if stage_confirm_enabled and expected_stage is not None and normalized_stage != expected_stage:
+        return None
+
+    abruptness = compute_abruptness(entry_row)
+    if abruptness is not None and abruptness > max_abruptness:
+        return None
+
+    entry_price = float(entry_row["close"])
+    stop_loss_price, stop_loss_pct = compute_atr_stop_loss(entry_row, atr_stop_multiple)
+    actual_exit_index, exit_price, stop_hit = find_exit_with_atr_stop(frame, end_index, planned_exit_index, stop_loss_price)
+    exit_row = frame.iloc[actual_exit_index]
+    r_value = (exit_price - entry_price) / entry_price
 
     return TradeResult(
         symbol=match.symbol,
         timeframe=match.timeframe,
         trend_label=match.trend_label,
+        reference_label=reference_label,
+        reference_selector=reference_selector,
         period_start=match.period_start,
         period_end=match.period_end,
         entry_time=pd.Timestamp(entry_row["close_time"]),
@@ -538,9 +740,11 @@ def evaluate_match(
         exit_price=exit_price,
         r_value=r_value,
         bars_forward=bars_forward,
-        stage=None if pd.isna(stage) else int(stage),
-        stage_stop_anchor=None if pd.isna(stage_stop_anchor) else float(stage_stop_anchor),
-        stage_stop_pct=None if pd.isna(stage_stop_pct) else float(stage_stop_pct),
+        stage=normalized_stage,
+        abruptness=abruptness,
+        stop_loss_price=stop_loss_price,
+        stop_loss_pct=stop_loss_pct,
+        stop_hit=stop_hit,
     )
 
 
@@ -713,7 +917,7 @@ def visualize_trades(
         axes[0].grid(True, alpha=0.3)
         axes[0].legend(loc="best")
 
-        stop_loss_price = trade.stage_stop_anchor if trade.stage_stop_anchor is not None else trade.entry_price - (trade.entry_price * abs(trade.r_value))
+        stop_loss_price = trade.stop_loss_price if trade.stop_loss_price is not None else trade.entry_price
 
         draw_candlesticks(axes[1], trade_datetimes, trade_window)
         axes[1].plot(trade_datetimes, trade_window["sma30"], color="#38BDF8", linewidth=1.2, label="SMA30")
@@ -737,9 +941,9 @@ def visualize_trades(
             label="Exit",
             zorder=4,
         )
-        axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="SL Anchor")
+        axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="ATR Stop")
         axes[1].annotate(
-            "SL Anchor",
+            "ATR Stop",
             xy=(trade_datetimes.iloc[exit_offset], stop_loss_price),
             xytext=(-8, 6),
             textcoords="offset points",
@@ -748,7 +952,7 @@ def visualize_trades(
             ha="right",
             va="bottom",
         )
-        axes[1].set_title(f"Trade: {trade.symbol} ({trade.timeframe}, {trade.trend_label})")
+        axes[1].set_title(f"Trade: {trade.symbol} ({trade.timeframe}, {trade.trend_label}, ref={trade.reference_label})")
         axes[1].set_ylabel("Price")
         axes[1].grid(True, alpha=0.3)
         axes[1].legend(loc="best")
@@ -767,7 +971,9 @@ def visualize_trades(
 
         outcome = "WIN" if trade.r_value > 0 else "LOSS" if trade.r_value < 0 else "FLAT"
         stage_text = f"Stage {trade.stage}" if trade.stage is not None else "Stage N/A"
-        fig.suptitle(f"{trade.symbol} | {stage_text} | R={trade.r_value:.4f} | {outcome}", fontsize=14, fontweight="bold")
+        stop_text = "STOP" if trade.stop_hit else "TIME"
+        abrupt_text = f" | abrupt={trade.abruptness:.2f}" if trade.abruptness is not None else ""
+        fig.suptitle(f"{trade.symbol} | {stage_text} | R={trade.r_value:.4f} | {outcome} | {stop_text}{abrupt_text}", fontsize=14, fontweight="bold")
         fig.tight_layout(rect=(0, 0, 1, 0.96))
 
         filename = (
@@ -854,9 +1060,13 @@ def print_report(
                 "exit_time": trade.exit_time.isoformat(),
                 "entry_price": round(trade.entry_price, 8),
                 "exit_price": round(trade.exit_price, 8),
+                "reference": trade.reference_label,
+                "selector": trade.reference_selector,
                 "stage": trade.stage,
-                "stage_stop_anchor": None if trade.stage_stop_anchor is None else round(trade.stage_stop_anchor, 8),
-                "stage_stop_pct": None if trade.stage_stop_pct is None else round(trade.stage_stop_pct, 6),
+                "abruptness": None if trade.abruptness is None else round(trade.abruptness, 4),
+                "stop_loss_price": None if trade.stop_loss_price is None else round(trade.stop_loss_price, 8),
+                "stop_loss_pct": None if trade.stop_loss_pct is None else round(trade.stop_loss_pct, 6),
+                "stop_hit": trade.stop_hit,
                 "R": round(trade.r_value, 6),
             }
             for trade in trades
@@ -881,126 +1091,162 @@ def print_report(
 
 def main() -> None:
     args = parse_args()
-    summary_path = resolve_summary_path(args)
-    (
-        matches,
-        pattern_length,
-        reference_symbol,
-        reference_timeframe,
-        reference_label,
-        reference_period_start,
-        reference_period_end,
-    ) = parse_summary(
-        summary_path,
-        report_timezone=args.report_timezone,
-    )
+    if args.list_reference_profiles:
+        list_reference_profiles()
+        return
 
-    if not matches:
-        raise ValueError(f"summary 內沒有 match 結果：{summary_path}")
+    summary_jobs = resolve_summary_jobs(args)
 
     conn = sqlite3.connect(args.db_path.expanduser().resolve())
     symbol_frames: dict[tuple[str, str], pd.DataFrame] = {}
     ema_frames_by_symbol: dict[str, dict[str, pd.DataFrame]] = {}
     trades: list[TradeResult] = []
     skipped_matches = 0
-    reference_db_symbol = reference_symbol if reference_symbol.endswith(args.symbol_suffix) else f"{reference_symbol}{args.symbol_suffix}"
+    total_matches = 0
+    generated_visualizations = 0
+    visualization_requests: list[tuple[Path, str, str, str, pd.Timestamp, pd.Timestamp, str]] = []
+    latest_reference_symbol = ""
+    latest_reference_timeframe = ""
+    latest_reference_label = ""
+    latest_pattern_length = 0
+    reference_frame_lookup: dict[tuple[str, str], pd.DataFrame] = {}
 
     try:
-        if args.visualize:
-            reference_frame_key = (reference_db_symbol, reference_timeframe)
-            try:
-                symbol_frames[reference_frame_key] = load_cached_reference_frame(
-                    reports_dir=args.reports_dir.expanduser().resolve(),
-                    reference_symbol=reference_symbol,
-                    reference_timeframe=reference_timeframe,
-                    reference_label=reference_label,
-                    reference_period_start=reference_period_start,
-                    reference_period_end=reference_period_end,
-                )
-            except (FileNotFoundError, ValueError):
-                symbol_frames[reference_frame_key] = load_symbol_frame(conn, reference_db_symbol, reference_timeframe)
-
-        for match in matches:
-            db_symbol = match.symbol if match.symbol.endswith(args.symbol_suffix) else f"{match.symbol}{args.symbol_suffix}"
-            frame_key = (db_symbol, match.timeframe)
-            if frame_key not in symbol_frames:
-                symbol_frames[frame_key] = build_stage_labels(add_stage_features(load_symbol_frame(conn, db_symbol, match.timeframe)))
-
-            ema_frames: dict[str, pd.DataFrame] | None = None
-            if args.ema200_filter:
-                if db_symbol not in ema_frames_by_symbol:
-                    ema_frames_by_symbol[db_symbol] = {
-                        timeframe: build_ema_frame(load_symbol_frame(conn, db_symbol, timeframe))
-                        for timeframe in EMA_FILTER_TIMEFRAMES
-                    }
-                ema_frames = ema_frames_by_symbol[db_symbol]
-
-            trade = evaluate_match(
-                frame=symbol_frames[frame_key],
-                match=match,
-                pattern_length=pattern_length,
-                extension_factor=args.extension_factor,
-                ema_frames=ema_frames,
+        for job in summary_jobs:
+            (
+                matches,
+                pattern_length,
+                reference_symbol,
+                reference_timeframe,
+                reference_label,
+                reference_period_start,
+                reference_period_end,
+            ) = parse_summary(
+                job.summary_path,
+                report_timezone=args.report_timezone,
             )
-            if trade is None:
-                skipped_matches += 1
-                continue
-            trades.append(trade)
+            if not matches:
+                raise ValueError(f"summary 內沒有 match 結果：{job.summary_path}")
+
+            total_matches += len(matches)
+            latest_reference_symbol = reference_symbol
+            latest_reference_timeframe = reference_timeframe
+            latest_reference_label = reference_label
+            latest_pattern_length = pattern_length
+            reference_db_symbol = reference_symbol if reference_symbol.endswith(args.symbol_suffix) else f"{reference_symbol}{args.symbol_suffix}"
+
+            if args.visualize:
+                reference_frame_key = (reference_db_symbol, reference_timeframe)
+                if reference_frame_key not in symbol_frames:
+                    try:
+                        symbol_frames[reference_frame_key] = load_cached_reference_frame(
+                            reports_dir=args.reports_dir.expanduser().resolve(),
+                            reference_symbol=reference_symbol,
+                            reference_timeframe=reference_timeframe,
+                            reference_label=reference_label,
+                            reference_period_start=reference_period_start,
+                            reference_period_end=reference_period_end,
+                        )
+                    except (FileNotFoundError, ValueError):
+                        symbol_frames[reference_frame_key] = load_symbol_frame(conn, reference_db_symbol, reference_timeframe)
+                reference_frame_lookup[reference_frame_key] = symbol_frames[reference_frame_key]
+                visualization_requests.append((job.summary_path, reference_symbol, reference_timeframe, reference_label, reference_period_start, reference_period_end, reference_db_symbol))
+
+            for match in matches:
+                db_symbol = match.symbol if match.symbol.endswith(args.symbol_suffix) else f"{match.symbol}{args.symbol_suffix}"
+                frame_key = (db_symbol, match.timeframe)
+                if frame_key not in symbol_frames:
+                    symbol_frames[frame_key] = build_stage_labels(add_stage_features(load_symbol_frame(conn, db_symbol, match.timeframe)))
+
+                ema_frames: dict[str, pd.DataFrame] | None = None
+                if args.ema200_filter:
+                    if db_symbol not in ema_frames_by_symbol:
+                        ema_frames_by_symbol[db_symbol] = {
+                            timeframe: build_ema_frame(load_symbol_frame(conn, db_symbol, timeframe))
+                            for timeframe in EMA_FILTER_TIMEFRAMES
+                        }
+                    ema_frames = ema_frames_by_symbol[db_symbol]
+
+                trade = evaluate_match(
+                    frame=symbol_frames[frame_key],
+                    match=match,
+                    pattern_length=pattern_length,
+                    extension_factor=args.extension_factor,
+                    reference_label=reference_label,
+                    reference_selector=job.reference_selector,
+                    atr_stop_multiple=args.atr_stop_multiple,
+                    max_abruptness=args.max_abruptness,
+                    stage_confirm_enabled=not args.disable_stage_confirm,
+                    ema_frames=ema_frames,
+                )
+                if trade is None:
+                    skipped_matches += 1
+                    continue
+                trades.append(trade)
     finally:
         conn.close()
 
-    generated_visualizations = 0
     if args.visualize and trades:
-        generated_visualizations = visualize_trades(
-            summary_path=summary_path,
-            reference_symbol=reference_symbol,
-            reference_timeframe=reference_timeframe,
-            reference_period_start=reference_period_start,
-            reference_period_end=reference_period_end,
-            reference_frame=symbol_frames[(reference_db_symbol, reference_timeframe)],
-            symbol_frames=symbol_frames,
-            trades=trades,
-            symbol_suffix=args.symbol_suffix,
-        )
+        for summary_path, reference_symbol, reference_timeframe, reference_label, reference_period_start, reference_period_end, reference_db_symbol in visualization_requests:
+            job_trades = [trade for trade in trades if trade.reference_label == reference_label]
+            if not job_trades:
+                continue
+            generated_visualizations += visualize_trades(
+                summary_path=summary_path,
+                reference_symbol=reference_symbol,
+                reference_timeframe=reference_timeframe,
+                reference_period_start=reference_period_start,
+                reference_period_end=reference_period_end,
+                reference_frame=reference_frame_lookup[(reference_db_symbol, reference_timeframe)],
+                symbol_frames=symbol_frames,
+                trades=job_trades,
+                symbol_suffix=args.symbol_suffix,
+            )
 
     print_report(
-        summary_path=summary_path,
-        reference_symbol=reference_symbol,
-        reference_timeframe=reference_timeframe,
-        reference_label=reference_label,
-        pattern_length=pattern_length,
+        summary_path=summary_jobs[0].summary_path if len(summary_jobs) == 1 else summary_jobs[0].summary_path.parent.parent,
+        reference_symbol=latest_reference_symbol if len(summary_jobs) == 1 else "MULTI",
+        reference_timeframe=latest_reference_timeframe if len(summary_jobs) == 1 else args.timeframe,
+        reference_label=latest_reference_label if len(summary_jobs) == 1 else ",".join(job.reference_selector for job in summary_jobs),
+        pattern_length=latest_pattern_length,
         extension_factor=args.extension_factor,
-        total_matches=len(matches),
+        total_matches=total_matches,
         skipped_matches=skipped_matches,
         trades=trades,
         ema200_filter_enabled=args.ema200_filter,
     )
 
     if args.visualize:
-        print(f"Visualization: {generated_visualizations} chart(s) -> {summary_path.parent / 'backtest_vis'}")
+        print(f"Visualization: {generated_visualizations} chart(s)")
 
     if args.json:
         metrics = summarize_trade_results(trades)
         payload = {
-            "summary_path": str(summary_path),
+            "summary_jobs": [
+                {"summary_path": str(job.summary_path), "reference_selector": job.reference_selector}
+                for job in summary_jobs
+            ],
             "reference": {
-                "symbol": reference_symbol,
-                "timeframe": reference_timeframe,
-                "label": reference_label,
+                "symbol": latest_reference_symbol if len(summary_jobs) == 1 else "MULTI",
+                "timeframe": latest_reference_timeframe if len(summary_jobs) == 1 else args.timeframe,
+                "label": latest_reference_label if len(summary_jobs) == 1 else [job.reference_selector for job in summary_jobs],
             },
-            "pattern_length": pattern_length,
+            "pattern_length": latest_pattern_length,
             "extension_factor": args.extension_factor,
-            "exit_bars": int(pattern_length * args.extension_factor),
+            "exit_bars": int(latest_pattern_length * args.extension_factor),
             "ema200_filter": args.ema200_filter,
+            "atr_stop_multiple": args.atr_stop_multiple,
+            "max_abruptness": args.max_abruptness,
+            "stage_confirm_enabled": not args.disable_stage_confirm,
             "visualize": args.visualize,
             "generated_visualizations": generated_visualizations,
-            "total_matches": len(matches),
+            "total_matches": total_matches,
             "evaluated_matches": len(trades),
             "skipped_matches": skipped_matches,
             **metrics,
         }
         print("-" * 72)
-        print(pd.Series(payload).to_json(force_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
 if __name__ == "__main__":
