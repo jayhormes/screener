@@ -65,25 +65,10 @@ REFERENCE_TRENDS = {
    "AVAX": [
        [datetime(2023, 11, 9, 12, 0), datetime(2023, 11, 14, 18, 0), "1h", "standard"],
    ],
-   "MKR": [
-       [datetime(2023, 6, 24, 9, 0), datetime(2023, 7, 18, 5, 0), "4h", "standard"],
-   ],
    "CRV": [
        [datetime(2024, 10, 23, 1, 0), datetime(2024, 11, 24, 0, 0), "4h", "uptrend"],
        [datetime(2024, 11, 4, 0, 0), datetime(2024, 11, 21, 0, 0), "4h", "uptrend_1"],
        [datetime(2024, 11, 4, 0, 0), datetime(2024, 11, 29, 0, 0), "4h", "uptrend_2"],
-   ],
-   "GMT": [
-       [datetime(2022, 3, 26, 9, 0), datetime(2022, 4, 14, 21, 0), "4h", "uptrend"]
-   ],
-   "SOL": [
-       [datetime(2023, 9, 21, 1, 0), datetime(2023, 10, 15, 21, 0), "4h", "standard"]
-   ],
-   "LQTY": [
-       [datetime(2025, 5, 7, 5, 0), datetime(2025, 5, 9, 21, 0), "30m", "standard"]
-   ],
-   "MOODENG": [
-       [datetime(2025, 5, 8, 0, 0), datetime(2025, 5, 11, 1, 0), "1h", "standard"]
    ],
 }
 
@@ -94,7 +79,8 @@ HISTORICAL_START_DATE = datetime(2021, 1, 1)
 TIMEZONE = "America/Los_Angeles"
 
 # Timeframes to analyze
-TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
+#TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
+TIMEFRAMES_TO_ANALYZE = ["30m"]
 
 # Main output directory
 OUTPUT_DIR = "historical_trend_finder_reports"
@@ -170,7 +156,7 @@ class DataProcessor(BaseDataProcessor):
             symbol_full = symbol
             
         # Set validate=False for reference trends, otherwise use default (True)
-        success, df = self.downloader.get_data(
+        success, df, _ = self.downloader.get_data(
             symbol_full,
             buffer_start_ts,
             end_ts,

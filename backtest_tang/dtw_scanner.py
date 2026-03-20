@@ -74,8 +74,7 @@ def extract_reference(pkl_path: Path | str, start_dt: datetime | str, end_dt: da
     frame = load_price_frame(data_path=Path(pkl_path))
     start_ts = _normalize_reference_datetime(start_dt)
     end_ts = _normalize_reference_datetime(end_dt)
-    # historical_trend_finder uses inclusive reference boundaries on bar open time.
-    mask = (frame["open_time"] >= start_ts) & (frame["open_time"] <= end_ts)
+    mask = (frame["open_time"] >= start_ts) & (frame["open_time"] < end_ts)
     reference_frame = frame.loc[mask].copy()
     if reference_frame.empty:
         raise ValueError(f"Reference window not found: {start_ts} ~ {end_ts}")
@@ -96,11 +95,10 @@ def _load_reference_from_pickle(reference_info: ReferenceInfo, reference_dir: Pa
             continue
 
         open_time = pd.to_datetime(frame.get("Open Time"), utc=True) if "Open Time" in frame.columns else None
-        if open_time is None:
+        close_time = pd.to_datetime(frame.get("Close Time"), utc=True) if "Close Time" in frame.columns else None
+        if open_time is None or close_time is None:
             continue
-        # Cached reference files from historical_trend_finder store the inclusive
-        # reference slice, so the last bar opens exactly at expected_end.
-        if open_time.iloc[0] != expected_start or open_time.iloc[-1] != expected_end:
+        if open_time.iloc[0] != expected_start or close_time.iloc[-1] != expected_end:
             continue
 
         renamed = frame.rename(
@@ -152,8 +150,8 @@ def calculate_similarity(reference_prepared: pd.DataFrame, window_prepared: pd.D
         return SimilarityScores(0.0, 0.0, 0.0)
 
     price_score = 1 / (1 + price_distance)
-    diff_score = 1 / (1 + diff_distance * dtw_calc.config.shapedtw_balance_pd_ratio)
-    similarity = (price_score * dtw_calc.config.price_weight) + (diff_score * dtw_calc.config.diff_weight)
+    diff_score = 1 / (1 + diff_distance)
+    similarity = (price_score * 0.6) + (diff_score * 0.4)
     return SimilarityScores(float(similarity), float(price_score), float(diff_score))
 
 

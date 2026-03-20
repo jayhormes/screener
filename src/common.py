@@ -45,7 +45,7 @@ class TrendAnalysisConfig:
         self.paa_window_size = 5
         
         # Default window scaling factors
-        self.window_scale_factors = [0.9, 0.95, 1.0, 1.05, 1.1]
+        self.window_scale_factors = [0.9, 1.0, 1.1]
         
         # Minimum query length
         self.min_query_length = 60
@@ -136,26 +136,34 @@ class DataNormalizer:
         
         # Flatten array to compute global statistics
         flat_data = data_array.flatten()
-        
+
+        # Convert to numeric once (non-numeric values -> NaN)
+        numeric_flat = pd.to_numeric(flat_data, errors='coerce')
+        numeric_data = numeric_flat.reshape(data_array.shape)
+        valid_flat = numeric_flat[pd.notna(numeric_flat)]
+
+        if len(valid_flat) == 0:
+            return np.zeros_like(data_array, dtype=float)
+
         # Step 1: Z-score normalization
-        global_mean = np.mean(flat_data)
-        global_std = np.std(flat_data)
+        global_mean = np.mean(valid_flat)
+        global_std = np.std(valid_flat)
         
         # Handle zero standard deviation
         if global_std > 0:
-            z_scored = (data_array - global_mean) / global_std
+            z_scored = (numeric_data - global_mean) / global_std
         else:
             # Fallback to min-max if std is zero
-            global_min = np.min(flat_data)
-            global_max = np.max(flat_data)
+            global_min = np.min(valid_flat)
+            global_max = np.max(valid_flat)
             if global_max > global_min:
-                z_scored = (data_array - global_min) / (global_max - global_min)
+                z_scored = (numeric_data - global_min) / (global_max - global_min)
             else:
-                z_scored = np.zeros_like(data_array)
-        
-        # Step 2: Min-max scaling to target range
-        z_min = np.min(z_scored)
-        z_max = np.max(z_scored)
+                z_scored = np.zeros_like(numeric_data, dtype=float)
+
+        # Step 2: Min-max scaling to target range (ignore NaN from non-numeric values)
+        z_min = np.nanmin(z_scored)
+        z_max = np.nanmax(z_scored)
         
         # Handle case where min equals max
         if z_max > z_min:
@@ -177,6 +185,30 @@ class DataNormalizer:
         
         # Flatten array to compute global statistics
         flat_data = data_array.flatten()
+
+        # Convert to numeric once (non-numeric values -> NaN)
+        numeric_flat = pd.to_numeric(flat_data, errors='coerce')
+
+        # Filter out non-numeric values (NaN, strings, etc.)
+        numeric_mask = pd.notna(numeric_flat)
+        flat_data = numeric_flat[numeric_mask]
+
+        # Keep a numeric array with original shape for downstream calculations
+        numeric_data = numeric_flat.reshape(data_array.shape)
+        
+        if len(flat_data) == 0:
+            # Return default params if no valid numeric data
+            return {
+                'global_mean': 0,
+                'global_std': 1,
+                'z_min': 0,
+                'z_max': 1,
+                'target_min': target_range[0],
+                'target_max': target_range[1]
+            }
+        
+        # Convert to float for calculations
+        flat_data = flat_data.astype(float)
         
         # Step 1: Z-score normalization parameters
         global_mean = np.mean(flat_data)
@@ -184,19 +216,19 @@ class DataNormalizer:
         
         # Handle zero standard deviation case
         if global_std > 0:
-            z_scored = (data_array - global_mean) / global_std
+            z_scored = (numeric_data - global_mean) / global_std
         else:
             # Fallback to min-max if std is zero
             global_min = np.min(flat_data)
             global_max = np.max(flat_data)
             if global_max > global_min:
-                z_scored = (data_array - global_min) / (global_max - global_min)
+                z_scored = (numeric_data - global_min) / (global_max - global_min)
             else:
-                z_scored = np.zeros_like(data_array)
-        
-        # Step 2: Min-max scaling parameters
-        z_min = np.min(z_scored)
-        z_max = np.max(z_scored)
+                z_scored = np.zeros_like(numeric_data, dtype=float)
+
+        # Step 2: Min-max scaling parameters (ignore NaN from non-numeric values)
+        z_min = np.nanmin(z_scored)
+        z_max = np.nanmax(z_scored)
         
         target_min, target_max = target_range
         
@@ -226,13 +258,16 @@ class DataNormalizer:
         z_max = norm_params['z_max']
         target_min = norm_params['target_min']
         target_max = norm_params['target_max']
-        
+
+        # Convert to numeric (non-numeric values -> NaN) to avoid object-array math errors
+        numeric_data = pd.to_numeric(data_array.flatten(), errors='coerce').reshape(data_array.shape)
+
         # Apply Z-score normalization using stored parameters
         if global_std > 0:
-            z_scored = (data_array - global_mean) / global_std
+            z_scored = (numeric_data - global_mean) / global_std
         else:
             # This is a fallback case that should rarely happen
-            z_scored = np.zeros_like(data_array)
+            z_scored = np.zeros_like(numeric_data, dtype=float)
         
         # Apply min-max scaling using stored parameters
         if z_max > z_min:
@@ -321,8 +356,11 @@ class TimeSeriesProcessor:
         
         # Add volume mapping if needed and available
         if include_volume and 'volume' in df.columns:
+            # Drop the original capital-V 'Volume' column to avoid duplicate columns after rename
+            if 'Volume' in df.columns:
+                df = df.drop(columns=['Volume'])
             column_mapping['volume'] = 'Volume'
-        
+
         df = df.rename(columns=column_mapping)
         
         # Calculate SMA difference features
@@ -560,18 +598,7 @@ class DataCacheManager:
     @staticmethod
     def download_timeframe_data(timeframe: str, output_dir: str, config: TrendAnalysisConfig, 
                                 historical_start_date: datetime, data_processor) -> dict:
-        """Download and cache data for all symbols of a specific timeframe"""
-        # Check for cached data
-        cache_file = DataCacheManager.get_timeframe_cache_path(output_dir, timeframe)
-        
-        if os.path.exists(cache_file):
-            print(f"Loading cached data for timeframe {timeframe}...")
-            data_dict = FileManager.load_from_cache(cache_file)
-            if data_dict is not None:
-                print(f"Loaded cached data for {len(data_dict)} symbols in timeframe {timeframe}")
-                return data_dict
-        
-        print(f"No cached data found for timeframe {timeframe}, downloading...")
+        """Download data for all symbols of a specific timeframe using individual caches"""
         
         # Get all available symbols
         all_symbols = data_processor.downloader.get_all_symbols()
@@ -584,37 +611,54 @@ class DataCacheManager:
         # Get current time as end timestamp
         end_timestamp = int(time.time())
         
-        # Download data for all symbols
+        # Download/Load data for all symbols
         data_dict = {}
         
-        print(f"Downloading data for timeframe {timeframe} from {historical_start_date} to now...")
+        from datetime import datetime as dt
+        print(f"[{dt.now().strftime('%H:%M:%S')}] Processing data for timeframe {timeframe} from {historical_start_date} to now...")
         
         for symbol in symbols:
-            print(f"Downloading data for {symbol} ({timeframe})...")
-            
-            # Get data
-            df = data_processor.get_data(
+            # Get data (downloader will handle individual pkl cache)
+            start_fetch_time = time.time()
+            result = data_processor.get_data(
                 symbol,
                 timeframe,
                 start_timestamp,
                 end_timestamp
             )
-            
-            if not df.empty:
-                data_dict[symbol] = df
-                print(f"Downloaded {len(df)} data points for {symbol} ({timeframe})")
+            fetch_duration = time.time() - start_fetch_time
+
+            # Normalize legacy tuple returns and current DataFrame-only processors.
+            fetched_from_network = False
+            if isinstance(result, tuple):
+                if len(result) == 3:
+                    success, df, fetched_from_network = result
+                elif len(result) == 2:
+                    df, fetched_from_network = result
+                    success = df is not None and not df.empty
+                else:
+                    raise ValueError(f"Unsupported get_data() return format for {symbol}: {type(result)} len={len(result)}")
             else:
-                print(f"Failed to download data for {symbol} ({timeframe})")
-                data_dict[symbol] = None
+                df = result
+                success = df is not None and not df.empty
             
-            # Sleep to avoid API rate limits
-            time.sleep(config.api_sleep_seconds)
+            if success and not df.empty:
+                data_dict[symbol] = df
+                # Only log and sleep if we actually went to the network
+                if fetched_from_network:
+                    # Adaptive sleep: scale based on fetch duration
+                    # Short fetch = few API calls = short sleep
+                    # Long fetch = many API calls = longer sleep
+                    adaptive_sleep = min(config.api_sleep_seconds, max(1.0, fetch_duration * 2.5))
+                    print(f"[{dt.now().strftime('%H:%M:%S')}] Synced {symbol} ({timeframe}), {len(df)} pts, fetch={fetch_duration:.1f}s, sleep={adaptive_sleep:.1f}s")
+                    time.sleep(adaptive_sleep)
+                # Optional: Log cache hits every 100 symbols to show progress
+                elif len(data_dict) % 100 == 0:
+                    print(f"[{dt.now().strftime('%H:%M:%S')}] Progress: {len(data_dict)}/{len(symbols)} symbols processed (cache)...")
+            else:
+                data_dict[symbol] = None
         
-        # Save to cache
-        FileManager.save_to_cache(data_dict, cache_file)
-        
-        print(f"Saved data for timeframe {timeframe} to cache")
-        
+        print(f"[{dt.now().strftime('%H:%M:%S')}] Completed processing {len(data_dict)} symbols for {timeframe}")
         return data_dict
 
 
@@ -933,7 +977,7 @@ def parse_target_symbols(filepath: str, target_section: str = "###TARGETS") -> L
         return []
 
     targets = []
-    with open(filepath, 'r') as f:
+    with open(filepath, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
     target_section_found = False

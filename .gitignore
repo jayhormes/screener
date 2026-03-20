@@ -1,7 +1,21 @@
 .DS_Store
 .idea/
+.claude/
+.vscode/
+__pycache__/
 trade
 output
 /src/__pycache__/*.pyc
 historical_trend_finder_reports
 similarity_output
+
+# Sensitive/local config
+config.json
+api_keys.json
+
+# Local scratch/output files
+RS_*.txt
+
+# Local databases/cache
+*.db
+data_cache/
