@@ -66,8 +66,6 @@ REFERENCE_TRENDS = {
        [datetime(2023, 11, 9, 12, 0), datetime(2023, 11, 14, 18, 0), "1h", "standard"],
    ],
    "CRV": [
-       [datetime(2024, 10, 23, 1, 0), datetime(2024, 11, 24, 0, 0), "4h", "uptrend"],
-       [datetime(2024, 11, 4, 0, 0), datetime(2024, 11, 21, 0, 0), "4h", "uptrend_1"],
        [datetime(2024, 11, 4, 0, 0), datetime(2024, 11, 29, 0, 0), "4h", "uptrend_2"],
    ],
 }
@@ -79,8 +77,7 @@ HISTORICAL_START_DATE = datetime(2021, 1, 1)
 TIMEZONE = "America/Los_Angeles"
 
 # Timeframes to analyze
-#TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
-TIMEFRAMES_TO_ANALYZE = ["30m"]
+TIMEFRAMES_TO_ANALYZE = ["15m", "30m", "1h", "2h", "4h"]
 
 # Main output directory
 OUTPUT_DIR = "historical_trend_finder_reports"
