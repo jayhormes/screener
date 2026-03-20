@@ -475,12 +475,25 @@ def visualize_trades(
         axes[0].grid(True, alpha=0.3)
         axes[0].legend(loc="best")
 
+        stop_loss_price = trade.entry_price - (trade.entry_price * abs(trade.r_value))
+
         axes[1].plot(trade_datetimes, trade_window["close"], color="tab:green", linewidth=1.5)
         axes[1].plot(trade_datetimes, trade_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
         axes[1].plot(trade_datetimes, trade_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
         axes[1].plot(trade_datetimes, trade_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
         axes[1].scatter([trade_datetimes.iloc[entry_offset]], [trade.entry_price], color="orange", s=60, label="Entry", zorder=3)
         axes[1].scatter([trade_datetimes.iloc[exit_offset]], [trade.exit_price], color="red", s=60, label="Exit", zorder=3)
+        axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="SL -1R")
+        axes[1].annotate(
+            "SL -1R",
+            xy=(trade_datetimes.iloc[exit_offset], stop_loss_price),
+            xytext=(-8, 6),
+            textcoords="offset points",
+            color="red",
+            fontsize=10,
+            ha="right",
+            va="bottom",
+        )
         axes[1].set_title(f"Trade: {trade.symbol} ({trade.timeframe}, {trade.trend_label})")
         axes[1].set_ylabel("Close")
         axes[1].grid(True, alpha=0.3)
