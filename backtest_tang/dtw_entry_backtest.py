@@ -5,6 +5,7 @@ import pickle
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -16,6 +17,7 @@ DEFAULT_REPORTS_DIR = PROJECT_ROOT / "historical_trend_finder_reports"
 DEFAULT_DB_PATH = PROJECT_ROOT / "data_cache" / "binance_klines.db"
 EMA_FILTER_TIMEFRAMES = ("30m", "4h")
 EMA_LENGTH = 200
+CHART_TIMEZONE = timezone(timedelta(hours=8), name="GMT+8")
 
 RESULT_LINE_RE = re.compile(r"^\d+\.\s+([A-Z0-9]+)\s+\(([^)]+)\)\s*$")
 PERIOD_LINE_RE = re.compile(r"^\s*Period:\s*(.+?)\s+to\s+(.+?)\s*$")
@@ -395,6 +397,30 @@ def add_sma_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return sma_frame
 
 
+def build_chart_datetimes(frame: pd.DataFrame) -> pd.Series:
+    return frame["open_time"].dt.tz_convert(CHART_TIMEZONE)
+
+
+def build_xticks(datetimes: pd.Series, count: int = 6) -> list[pd.Timestamp]:
+    if datetimes.empty:
+        return []
+    if len(datetimes) <= count:
+        return list(datetimes)
+
+    last_index = len(datetimes) - 1
+    positions = sorted({round(step * last_index / (count - 1)) for step in range(count)})
+    return [datetimes.iloc[position] for position in positions]
+
+
+def configure_datetime_axis(axis: Any, datetimes: pd.Series, xlabel: str | None = None) -> None:
+    ticks = build_xticks(datetimes)
+    axis.set_xticks(ticks)
+    axis.set_xticklabels([timestamp.strftime("%m-%d %H:%M") for timestamp in ticks], rotation=30, ha="right")
+    axis.tick_params(axis="x", labelbottom=True)
+    if xlabel:
+        axis.set_xlabel(xlabel)
+
+
 def visualize_trades(
     summary_path: Path,
     reference_symbol: str,
@@ -415,11 +441,14 @@ def visualize_trades(
     reference_entry_price = float(reference_window.iloc[reference_entry_index]["close"])
     generated = 0
 
+    reference_datetimes = build_chart_datetimes(reference_window)
+
     for index, trade in enumerate(trades, start=1):
         db_symbol = trade.symbol if trade.symbol.endswith(symbol_suffix) else f"{trade.symbol}{symbol_suffix}"
         frame = symbol_frames[(db_symbol, trade.timeframe)]
         trade_window, entry_offset, exit_offset = build_trade_window(frame, trade)
         trade_window = add_sma_columns(trade_window)
+        trade_datetimes = build_chart_datetimes(trade_window)
 
         fig, axes = plt.subplots(
             3,
@@ -429,12 +458,12 @@ def visualize_trades(
             gridspec_kw={"height_ratios": [1.0, 1.0, 0.6]},
         )
 
-        axes[0].plot(reference_window.index, reference_window["close"], color="tab:blue", linewidth=1.5)
-        axes[0].plot(reference_window.index, reference_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
-        axes[0].plot(reference_window.index, reference_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
-        axes[0].plot(reference_window.index, reference_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
+        axes[0].plot(reference_datetimes, reference_window["close"], color="tab:blue", linewidth=1.5)
+        axes[0].plot(reference_datetimes, reference_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
+        axes[0].plot(reference_datetimes, reference_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
+        axes[0].plot(reference_datetimes, reference_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
         axes[0].scatter(
-            [reference_entry_index],
+            [reference_datetimes.iloc[reference_entry_index]],
             [reference_entry_price],
             color="red",
             s=60,
@@ -446,23 +475,27 @@ def visualize_trades(
         axes[0].grid(True, alpha=0.3)
         axes[0].legend(loc="best")
 
-        axes[1].plot(trade_window.index, trade_window["close"], color="tab:green", linewidth=1.5)
-        axes[1].plot(trade_window.index, trade_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
-        axes[1].plot(trade_window.index, trade_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
-        axes[1].plot(trade_window.index, trade_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
-        axes[1].scatter([entry_offset], [trade.entry_price], color="orange", s=60, label="Entry", zorder=3)
-        axes[1].scatter([exit_offset], [trade.exit_price], color="red", s=60, label="Exit", zorder=3)
+        axes[1].plot(trade_datetimes, trade_window["close"], color="tab:green", linewidth=1.5)
+        axes[1].plot(trade_datetimes, trade_window["sma30"], color="yellow", linewidth=1.2, label="SMA30")
+        axes[1].plot(trade_datetimes, trade_window["sma45"], color="orange", linewidth=1.2, label="SMA45")
+        axes[1].plot(trade_datetimes, trade_window["sma60"], color="purple", linewidth=1.2, label="SMA60")
+        axes[1].scatter([trade_datetimes.iloc[entry_offset]], [trade.entry_price], color="orange", s=60, label="Entry", zorder=3)
+        axes[1].scatter([trade_datetimes.iloc[exit_offset]], [trade.exit_price], color="red", s=60, label="Exit", zorder=3)
         axes[1].set_title(f"Trade: {trade.symbol} ({trade.timeframe}, {trade.trend_label})")
         axes[1].set_ylabel("Close")
         axes[1].grid(True, alpha=0.3)
         axes[1].legend(loc="best")
 
         volume_colors = ["green" if close >= open_ else "red" for open_, close in zip(trade_window["open"], trade_window["close"])]
-        axes[2].bar(trade_window.index, trade_window["volume"], color=volume_colors, width=0.8)
+        axes[2].bar(trade_datetimes, trade_window["volume"], color=volume_colors, width=0.02)
         axes[2].set_title("Volume")
-        axes[2].set_xlabel("Bars")
+        axes[2].set_xlabel("Datetime (GMT+8)")
         axes[2].set_ylabel("Volume")
         axes[2].grid(True, axis="y", alpha=0.3)
+
+        configure_datetime_axis(axes[0], reference_datetimes, xlabel="Datetime (GMT+8)")
+        configure_datetime_axis(axes[1], trade_datetimes, xlabel="Datetime (GMT+8)")
+        configure_datetime_axis(axes[2], trade_datetimes, xlabel="Datetime (GMT+8)")
 
         outcome = "WIN" if trade.r_value > 0 else "LOSS" if trade.r_value < 0 else "FLAT"
         fig.suptitle(f"{trade.symbol} | R={trade.r_value:.4f} | {outcome}", fontsize=14, fontweight="bold")
