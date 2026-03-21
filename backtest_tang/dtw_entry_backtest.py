@@ -26,7 +26,7 @@ SLOPE_ATR_MULTIPLE = 0.15
 TOUCH_ATR_MULTIPLE = 0.25
 ATR_PERIOD = 14
 BREAKOUT_ATR_MULTIPLE = 0.10
-ABRUPT_MULTIPLE = 4.0
+ABRUPT_MULTIPLE = 5.0
 ABRUPT_LOOKBACK = 60
 ABRUPT_WEIGHT = 0.5
 ATR_CAP_RATIO = 0.10
@@ -195,6 +195,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--volume-low-ratio", type=float, default=0.2, help="Low liquidity threshold ratio")
     parser.add_argument("--volume-max-low-bars", type=int, default=3, help="Max allowed low liquidity bars")
     parser.add_argument("--use-abrupt-volume", action="store_true", help="Mix abrupt volume reference into ATR-based stage thresholds")
+    parser.add_argument("--abrupt-volume", action="store_true", help="Enable abrupt volume detection and marking")
     parser.add_argument(
         "--abrupt-multiplier",
         type=float,
@@ -206,6 +207,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=ABRUPT_LOOKBACK,
         help=f"Lookback bars when searching abrupt volume reference. Default: {ABRUPT_LOOKBACK}",
+    )
+    parser.add_argument(
+        "--abrupt-body-ratio",
+        type=float,
+        default=0.40,
+        help="Min body ratio for abrupt candle (default: 0.40)",
     )
     parser.add_argument(
         "--atr-stop-multiple",
@@ -590,6 +597,138 @@ def passes_volume_filter(
 
     low_bar_count = int((liquidity < avg_liquidity * low_ratio).sum())
     return low_bar_count <= max_low_bars
+
+
+def detect_abrupt_volume(
+    frame: pd.DataFrame,
+    index: int,
+    volume_multiplier: float = 5.0,
+    body_ratio_min: float = 0.40,
+) -> dict | None:
+    """偵測突兀量 K 棒。"""
+    if index < 1:
+        return None
+
+    prev_bar = frame.iloc[index - 1]
+    curr_bar = frame.iloc[index]
+
+    prev_volume = float(prev_bar["volume"])
+    curr_volume = float(curr_bar["volume"])
+    if prev_volume <= 0 or curr_volume < prev_volume * volume_multiplier:
+        return None
+
+    high = float(curr_bar["high"])
+    low = float(curr_bar["low"])
+    open_price = float(curr_bar["open"])
+    close_price = float(curr_bar["close"])
+
+    full_range = high - low
+    if full_range <= 0:
+        return None
+
+    body = abs(close_price - open_price)
+    body_ratio = body / full_range
+    if body_ratio < body_ratio_min:
+        return None
+
+    upper_shadow = high - max(open_price, close_price)
+    if upper_shadow > full_range * (1 - body_ratio):
+        return None
+
+    is_bullish = close_price > open_price
+    return {
+        "abrupt_bar_close": close_price,
+        "abrupt_bar_low": low,
+        "abrupt_bar_high": high,
+        "body_ratio": body_ratio,
+        "volume_ratio": curr_volume / prev_volume,
+        "is_bullish": is_bullish,
+    }
+
+
+def collect_abrupt_volume_markers(
+    frame: pd.DataFrame,
+    volume_multiplier: float = 5.0,
+    body_ratio_min: float = 0.40,
+) -> list[tuple[int, dict[str, float | bool]]]:
+    markers: list[tuple[int, dict[str, float | bool]]] = []
+    for index in range(1, len(frame)):
+        abrupt_info = detect_abrupt_volume(frame, index, volume_multiplier=volume_multiplier, body_ratio_min=body_ratio_min)
+        if abrupt_info and abrupt_info["is_bullish"]:
+            markers.append((index, abrupt_info))
+    return markers
+
+
+def plot_abrupt_volume_markers(
+    axis: Any,
+    datetimes: pd.Series,
+    frame: pd.DataFrame,
+    candle_width: float,
+    volume_multiplier: float,
+    body_ratio_min: float,
+) -> None:
+    import matplotlib.dates as mdates
+    from matplotlib.patches import Rectangle
+
+    highlight_color = "#22c55e"
+    half_width = candle_width / 2
+    x_values = mdates.date2num(datetimes.dt.to_pydatetime())
+
+    for marker_index, abrupt_info in collect_abrupt_volume_markers(
+        frame,
+        volume_multiplier=volume_multiplier,
+        body_ratio_min=body_ratio_min,
+    ):
+        row = frame.iloc[marker_index]
+        x_value = x_values[marker_index]
+        low_price = float(row["low"])
+        high_price = float(row["high"])
+        open_price = float(row["open"])
+        close_price = float(row["close"])
+        body_bottom = min(open_price, close_price)
+        body_height = abs(close_price - open_price)
+
+        axis.add_patch(
+            Rectangle(
+                (x_value - half_width * 1.15, body_bottom if body_height > 0 else close_price - ((high_price - low_price) * 0.01 or 1e-9)),
+                candle_width * 1.3,
+                body_height if body_height > 0 else max((high_price - low_price) * 0.02, 1e-9),
+                fill=False,
+                edgecolor=highlight_color,
+                linewidth=1.8,
+                linestyle="-",
+                zorder=4,
+            )
+        )
+        axis.annotate(
+            "V5",
+            xy=(x_value, abrupt_info["abrupt_bar_high"]),
+            xytext=(0, 8),
+            textcoords="offset points",
+            color=highlight_color,
+            fontsize=8,
+            fontweight="bold",
+            ha="center",
+            va="bottom",
+            zorder=5,
+        )
+        axis.annotate(
+            "",
+            xy=(x_value, abrupt_info["abrupt_bar_high"]),
+            xytext=(x_value, abrupt_info["abrupt_bar_low"]),
+            arrowprops={"arrowstyle": "-|>", "color": highlight_color, "lw": 1.2, "alpha": 0.9},
+            zorder=4,
+        )
+        axis.hlines(
+            abrupt_info["abrupt_bar_close"],
+            x_value,
+            x_values[-1] + candle_width,
+            color=highlight_color,
+            linestyle="--",
+            linewidth=1.5,
+            alpha=0.8,
+            zorder=1.5,
+        )
 
 
 def find_abrupt_volume_reference(
@@ -1001,6 +1140,9 @@ def visualize_trades(
     symbol_frames: dict[tuple[str, str], pd.DataFrame],
     trades: list[TradeResult],
     symbol_suffix: str,
+    abrupt_volume_enabled: bool = False,
+    abrupt_multiplier: float = 5.0,
+    abrupt_body_ratio: float = 0.40,
 ) -> int:
     plt = load_matplotlib()
     output_dir = summary_path.parent / "backtest_vis"
@@ -1028,7 +1170,7 @@ def visualize_trades(
             gridspec_kw={"height_ratios": [1.0, 1.0, 0.6]},
         )
 
-        draw_candlesticks(axes[0], reference_datetimes, reference_window)
+        reference_candle_width = draw_candlesticks(axes[0], reference_datetimes, reference_window)
         axes[0].plot(reference_datetimes, reference_window["sma30"], color="#38BDF8", linewidth=1.2, label="SMA30")
         axes[0].plot(reference_datetimes, reference_window["sma45"], color="#818CF8", linewidth=1.2, label="SMA45")
         axes[0].plot(reference_datetimes, reference_window["sma60"], color="#C084FC", linewidth=1.2, label="SMA60")
@@ -1043,11 +1185,20 @@ def visualize_trades(
         axes[0].set_title(f"Reference: {reference_symbol} ({reference_timeframe})")
         axes[0].set_ylabel("Price")
         axes[0].grid(True, alpha=0.3)
+        if abrupt_volume_enabled:
+            plot_abrupt_volume_markers(
+                axes[0],
+                reference_datetimes,
+                reference_window,
+                reference_candle_width,
+                volume_multiplier=abrupt_multiplier,
+                body_ratio_min=abrupt_body_ratio,
+            )
         axes[0].legend(loc="best")
 
         stop_loss_price = trade.stop_loss_price if trade.stop_loss_price is not None else trade.entry_price
 
-        draw_candlesticks(axes[1], trade_datetimes, trade_window)
+        trade_price_candle_width = draw_candlesticks(axes[1], trade_datetimes, trade_window)
         axes[1].plot(trade_datetimes, trade_window["sma30"], color="#38BDF8", linewidth=1.2, label="SMA30")
         axes[1].plot(trade_datetimes, trade_window["sma45"], color="#818CF8", linewidth=1.2, label="SMA45")
         axes[1].plot(trade_datetimes, trade_window["sma60"], color="#C084FC", linewidth=1.2, label="SMA60")
@@ -1080,6 +1231,15 @@ def visualize_trades(
             ha="right",
             va="bottom",
         )
+        if abrupt_volume_enabled:
+            plot_abrupt_volume_markers(
+                axes[1],
+                trade_datetimes,
+                trade_window,
+                trade_price_candle_width,
+                volume_multiplier=abrupt_multiplier,
+                body_ratio_min=abrupt_body_ratio,
+            )
         axes[1].set_title(f"Trade: {trade.symbol} ({trade.timeframe}, {trade.trend_label}, ref={trade.reference_label})")
         axes[1].set_ylabel("Price")
         axes[1].grid(True, alpha=0.3)
@@ -1360,6 +1520,9 @@ def main() -> None:
                 symbol_frames=symbol_frames,
                 trades=job_trades,
                 symbol_suffix=args.symbol_suffix,
+                abrupt_volume_enabled=args.abrupt_volume,
+                abrupt_multiplier=args.abrupt_multiplier,
+                abrupt_body_ratio=args.abrupt_body_ratio,
             )
 
     print_report(
@@ -1375,7 +1538,7 @@ def main() -> None:
         trades=trades,
         ema200_filter_enabled=args.ema200_filter,
         volume_filter_enabled=args.volume_filter,
-        abrupt_volume_enabled=args.use_abrupt_volume,
+        abrupt_volume_enabled=args.abrupt_volume or args.use_abrupt_volume,
     )
 
     if args.visualize:
@@ -1404,6 +1567,8 @@ def main() -> None:
             "use_abrupt_volume": args.use_abrupt_volume,
             "abrupt_multiplier": args.abrupt_multiplier,
             "abrupt_lookback": args.abrupt_lookback,
+            "abrupt_volume": args.abrupt_volume,
+            "abrupt_body_ratio": args.abrupt_body_ratio,
             "atr_stop_multiple": args.atr_stop_multiple,
             "max_abruptness": args.max_abruptness,
             "stage_confirm_enabled": not args.disable_stage_confirm,
