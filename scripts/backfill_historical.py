@@ -119,6 +119,8 @@ def paginate_fetch(
     fetched_all = []
     current_start = start_ts_ms
     consecutive_failures = 0
+    consecutive_429 = 0
+    MAX_CONSECUTIVE_429 = 3
 
     while current_start < end_ts_ms:
         params = {
@@ -133,14 +135,27 @@ def paginate_fetch(
             resp = session.get(BINANCE_FAPI_KLINES, params=params, timeout=10)
 
             if resp.status_code == 429:
+                consecutive_429 += 1
                 retry_after_header = resp.headers.get("retry-after", "60")
                 try:
                     retry_after = max(1, int(float(retry_after_header)))
                 except (TypeError, ValueError):
                     retry_after = 60
-                print(f"  [429] Rate limited, waiting {retry_after}s...")
+
+                if consecutive_429 >= MAX_CONSECUTIVE_429:
+                    print(
+                        f"  [WARNING] {symbol} {timeframe}: 連續 {MAX_CONSECUTIVE_429} 次被 429 限制，風險過高，跳過此 symbol。"
+                    )
+                    return []
+
+                print(f"  [429] 第 {consecutive_429} 次，等待 {retry_after}s...")
                 time_module.sleep(retry_after)
                 continue
+            else:
+                consecutive_429 = 0
+
+            if resp.status_code >= 400:
+                consecutive_429 = 0
 
             if resp.status_code != 200:
                 if resp.status_code in {413, 499, 500, 502, 503, 504}:
