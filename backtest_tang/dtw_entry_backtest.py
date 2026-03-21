@@ -949,9 +949,9 @@ def visualize_trades(
             label="Exit",
             zorder=4,
         )
-        axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="ATR Stop")
+        axes[1].axhline(stop_loss_price, color="red", linestyle="--", linewidth=1.5, label="Stop (ATR)")
         axes[1].annotate(
-            "ATR Stop",
+            "Stop (ATR)",
             xy=(trade_datetimes.iloc[exit_offset], stop_loss_price),
             xytext=(-8, 6),
             textcoords="offset points",
@@ -987,7 +987,7 @@ def visualize_trades(
             display_r_value = trade.r_value
 
         outcome = "WIN" if display_r_value > 0 else "LOSS" if display_r_value < 0 else "FLAT"
-        stage_text = f"Stage {trade.stage}" if trade.stage is not None else "Stage N/A"
+        stage_text = f"Stage {trade.stage}" if trade.stage is not None else "Standard"
         stop_text = "STOP" if trade.stop_hit else "TIME"
         abrupt_text = f" | abrupt={trade.abruptness:.2f}" if trade.abruptness is not None else ""
         fig.suptitle(
