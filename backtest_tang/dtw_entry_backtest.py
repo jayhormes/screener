@@ -977,11 +977,24 @@ def visualize_trades(
         configure_datetime_axis(axes[1], trade_datetimes, xlabel="Datetime (GMT+8)")
         configure_datetime_axis(axes[2], trade_datetimes, xlabel="Datetime (GMT+8)")
 
-        outcome = "WIN" if trade.r_value > 0 else "LOSS" if trade.r_value < 0 else "FLAT"
+        stop_distance = None
+        if trade.stop_loss_price not in (None, 0):
+            stop_distance = trade.entry_price - trade.stop_loss_price
+
+        if stop_distance not in (None, 0):
+            display_r_value = (trade.exit_price - trade.entry_price) / stop_distance
+        else:
+            display_r_value = trade.r_value
+
+        outcome = "WIN" if display_r_value > 0 else "LOSS" if display_r_value < 0 else "FLAT"
         stage_text = f"Stage {trade.stage}" if trade.stage is not None else "Stage N/A"
         stop_text = "STOP" if trade.stop_hit else "TIME"
         abrupt_text = f" | abrupt={trade.abruptness:.2f}" if trade.abruptness is not None else ""
-        fig.suptitle(f"{trade.symbol} | {stage_text} | R={trade.r_value:.4f} | {outcome} | {stop_text}{abrupt_text}", fontsize=14, fontweight="bold")
+        fig.suptitle(
+            f"{trade.symbol} | {stage_text} | R={display_r_value:.4f} | {outcome} | {stop_text}{abrupt_text}",
+            fontsize=14,
+            fontweight="bold",
+        )
         fig.tight_layout(rect=(0, 0, 1, 0.96))
 
         filename = (
