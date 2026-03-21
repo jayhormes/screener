@@ -26,6 +26,9 @@ SLOPE_ATR_MULTIPLE = 0.15
 TOUCH_ATR_MULTIPLE = 0.25
 ATR_PERIOD = 14
 BREAKOUT_ATR_MULTIPLE = 0.10
+ABRUPT_MULTIPLE = 4.0
+ABRUPT_LOOKBACK = 60
+ABRUPT_WEIGHT = 0.5
 ATR_CAP_RATIO = 0.10
 DEFAULT_ATR_STOP_MULTIPLE = 1.5
 DEFAULT_MAX_ABRUPTNESS = 1.8
@@ -191,6 +194,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--volume-lookback", type=int, default=20, help="Lookback bars for volume filter")
     parser.add_argument("--volume-low-ratio", type=float, default=0.2, help="Low liquidity threshold ratio")
     parser.add_argument("--volume-max-low-bars", type=int, default=3, help="Max allowed low liquidity bars")
+    parser.add_argument("--use-abrupt-volume", action="store_true", help="Mix abrupt volume reference into ATR-based stage thresholds")
+    parser.add_argument(
+        "--abrupt-multiplier",
+        type=float,
+        default=ABRUPT_MULTIPLE,
+        help=f"Abrupt volume threshold multiplier over volume SMA. Default: {ABRUPT_MULTIPLE}",
+    )
+    parser.add_argument(
+        "--abrupt-lookback",
+        type=int,
+        default=ABRUPT_LOOKBACK,
+        help=f"Lookback bars when searching abrupt volume reference. Default: {ABRUPT_LOOKBACK}",
+    )
     parser.add_argument(
         "--atr-stop-multiple",
         type=float,
@@ -576,6 +592,43 @@ def passes_volume_filter(
     return low_bar_count <= max_low_bars
 
 
+def find_abrupt_volume_reference(
+    frame: pd.DataFrame,
+    index: int,
+    lookback: int = ABRUPT_LOOKBACK,
+    volume_ma_period: int = 20,
+    abrupt_multiplier: float = ABRUPT_MULTIPLE,
+) -> float | None:
+    if index <= 0 or lookback <= 0 or volume_ma_period <= 0 or abrupt_multiplier <= 0:
+        return None
+
+    start_index = max(0, index - lookback)
+    for current_index in range(index - 1, start_index - 1, -1):
+        window_start = current_index - volume_ma_period + 1
+        if window_start < 0:
+            continue
+
+        volume_window = frame.iloc[window_start : current_index + 1]["volume"]
+        volume_ma = volume_window.mean()
+        if pd.isna(volume_ma) or float(volume_ma) <= 0:
+            continue
+
+        row = frame.iloc[current_index]
+        volume = row.get("volume")
+        high = row.get("high")
+        low = row.get("low")
+        if any(pd.isna(value) for value in (volume, high, low)):
+            continue
+        if float(volume) < float(volume_ma) * abrupt_multiplier:
+            continue
+
+        abrupt_range = float(high) - float(low)
+        if abrupt_range > 0:
+            return abrupt_range
+
+    return None
+
+
 def is_confirmed_swing_high(frame: pd.DataFrame, pivot_idx: int, lookback: int) -> bool:
     if pivot_idx - lookback < 0 or pivot_idx + lookback >= len(frame):
         return False
@@ -594,7 +647,12 @@ def is_confirmed_swing_low(frame: pd.DataFrame, pivot_idx: int, lookback: int) -
     return bool((pivot_low < left_lows).all() and (pivot_low <= right_lows).all())
 
 
-def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
+def build_stage_labels(
+    frame: pd.DataFrame,
+    use_abrupt_volume: bool = False,
+    abrupt_lookback: int = ABRUPT_LOOKBACK,
+    abrupt_multiplier: float = ABRUPT_MULTIPLE,
+) -> pd.DataFrame:
     if "sma30" not in frame.columns or "sma60" not in frame.columns or "atr" not in frame.columns:
         raise ValueError("frame 缺少 stage feature 欄位")
 
@@ -638,10 +696,23 @@ def build_stage_labels(frame: pd.DataFrame) -> pd.DataFrame:
         atr_valid = not (pd.isna(atr) or float(atr) <= 0 or pd.isna(close) or float(close) <= 0)
         if atr_valid:
             atr_ratio = min(float(atr) / float(close), ATR_CAP_RATIO)
-            gap_threshold = atr_ratio * GAP_ATR_MULTIPLE
-            slope_threshold = atr_ratio * SLOPE_ATR_MULTIPLE
-            touch_threshold = atr_ratio * TOUCH_ATR_MULTIPLE
-            breakout_threshold = atr_ratio * BREAKOUT_ATR_MULTIPLE
+            effective_reference = atr_ratio
+            if use_abrupt_volume:
+                abrupt_range = find_abrupt_volume_reference(
+                    frame,
+                    index,
+                    lookback=abrupt_lookback,
+                    abrupt_multiplier=abrupt_multiplier,
+                )
+                if abrupt_range is not None:
+                    abrupt_ratio = abrupt_range / float(close)
+                    if pd.notna(abrupt_ratio) and abrupt_ratio > 0:
+                        effective_reference = (atr_ratio * (1 - ABRUPT_WEIGHT)) + (abrupt_ratio * ABRUPT_WEIGHT)
+
+            gap_threshold = effective_reference * GAP_ATR_MULTIPLE
+            slope_threshold = effective_reference * SLOPE_ATR_MULTIPLE
+            touch_threshold = effective_reference * TOUCH_ATR_MULTIPLE
+            breakout_threshold = effective_reference * BREAKOUT_ATR_MULTIPLE
         else:
             gap_threshold = None
             slope_threshold = None
@@ -1105,6 +1176,7 @@ def print_report(
     trades: list[TradeResult],
     ema200_filter_enabled: bool,
     volume_filter_enabled: bool,
+    abrupt_volume_enabled: bool,
 ) -> None:
     metrics = summarize_trade_results(trades)
 
@@ -1115,6 +1187,7 @@ def print_report(
     print(f"Exit bars    : {int(pattern_length * extension_factor)}")
     print(f"EMA200 filter: {'ON (30m + 4h)' if ema200_filter_enabled else 'OFF'}")
     print(f"Volume filter: {'ON' if volume_filter_enabled else 'OFF'}")
+    print(f"Abrupt volume: {'ON' if abrupt_volume_enabled else 'OFF'}")
     print(f"Matches      : {total_matches}")
     print(f"Evaluated    : {metrics['trade_count']}")
     print(f"Skipped      : {skipped_matches}")
@@ -1231,7 +1304,12 @@ def main() -> None:
                 db_symbol = match.symbol if match.symbol.endswith(args.symbol_suffix) else f"{match.symbol}{args.symbol_suffix}"
                 frame_key = (db_symbol, match.timeframe)
                 if frame_key not in symbol_frames:
-                    symbol_frames[frame_key] = build_stage_labels(add_stage_features(load_symbol_frame(conn, db_symbol, match.timeframe)))
+                    symbol_frames[frame_key] = build_stage_labels(
+                        add_stage_features(load_symbol_frame(conn, db_symbol, match.timeframe)),
+                        use_abrupt_volume=args.use_abrupt_volume,
+                        abrupt_lookback=args.abrupt_lookback,
+                        abrupt_multiplier=args.abrupt_multiplier,
+                    )
 
                 ema_frames: dict[str, pd.DataFrame] | None = None
                 if args.ema200_filter:
@@ -1297,6 +1375,7 @@ def main() -> None:
         trades=trades,
         ema200_filter_enabled=args.ema200_filter,
         volume_filter_enabled=args.volume_filter,
+        abrupt_volume_enabled=args.use_abrupt_volume,
     )
 
     if args.visualize:
@@ -1322,6 +1401,9 @@ def main() -> None:
             "volume_lookback": args.volume_lookback,
             "volume_low_ratio": args.volume_low_ratio,
             "volume_max_low_bars": args.volume_max_low_bars,
+            "use_abrupt_volume": args.use_abrupt_volume,
+            "abrupt_multiplier": args.abrupt_multiplier,
+            "abrupt_lookback": args.abrupt_lookback,
             "atr_stop_multiple": args.atr_stop_multiple,
             "max_abruptness": args.max_abruptness,
             "stage_confirm_enabled": not args.disable_stage_confirm,
