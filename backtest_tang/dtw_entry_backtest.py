@@ -187,6 +187,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Require both 30m and 4h close prices to be above EMA200 at entry time.",
     )
+    parser.add_argument("--volume-filter", action="store_true", help="Enable volume quality filter")
+    parser.add_argument("--volume-lookback", type=int, default=20, help="Lookback bars for volume filter")
+    parser.add_argument("--volume-low-ratio", type=float, default=0.2, help="Low liquidity threshold ratio")
+    parser.add_argument("--volume-max-low-bars", type=int, default=3, help="Max allowed low liquidity bars")
     parser.add_argument(
         "--atr-stop-multiple",
         type=float,
@@ -468,7 +472,9 @@ def add_stage_features(frame: pd.DataFrame) -> pd.DataFrame:
         ],
         axis=1,
     ).max(axis=1)
-    stage_frame["atr"] = previous_tr.rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean()
+    valid_mask = stage_frame["volume"] > 0
+    atr = previous_tr[valid_mask].rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean()
+    stage_frame["atr"] = atr.reindex(stage_frame.index)
     return stage_frame
 
 
@@ -541,6 +547,33 @@ def passes_ema200_filter(ema_frames: dict[str, pd.DataFrame], entry_time: pd.Tim
         if float(entry_row["close"]) <= float(entry_row["ema200"]):
             return False
     return True
+
+
+def passes_volume_filter(
+    frame: pd.DataFrame,
+    entry_index: int,
+    lookback: int = 20,
+    low_ratio: float = 0.2,
+    max_low_bars: int = 3,
+) -> bool:
+    """
+    進場前檢查流動性是否足夠。
+    流動性 = close × volume（Quote Volume）
+
+    條件：低於 avg_liquidity × low_ratio 的 K 棒不得超過 max_low_bars 根
+    """
+    if entry_index < lookback:
+        return False
+
+    window = frame.iloc[entry_index - lookback : entry_index].copy()
+    liquidity = window["close"] * window["volume"]
+    avg_liquidity = liquidity.mean()
+
+    if avg_liquidity <= 0:
+        return False
+
+    low_bar_count = int((liquidity < avg_liquidity * low_ratio).sum())
+    return low_bar_count <= max_low_bars
 
 
 def is_confirmed_swing_high(frame: pd.DataFrame, pivot_idx: int, lookback: int) -> bool:
@@ -704,7 +737,11 @@ def evaluate_match(
     max_abruptness: float,
     stage_confirm_enabled: bool,
     ema_frames: dict[str, pd.DataFrame] | None = None,
-) -> TradeResult | None:
+    volume_filter_enabled: bool = False,
+    volume_lookback: int = 20,
+    volume_low_ratio: float = 0.2,
+    volume_max_low_bars: int = 3,
+) -> tuple[TradeResult | None, str | None]:
     bars_forward = int(pattern_length * extension_factor)
     if bars_forward < 1:
         raise ValueError(f"extension_factor 太小，導致 bars_forward={bars_forward}")
@@ -712,21 +749,30 @@ def evaluate_match(
     end_index = find_window_end_index(frame, match.period_end)
     planned_exit_index = end_index + bars_forward
     if planned_exit_index >= len(frame):
-        return None
+        return None, "insufficient_future_bars"
+
+    if volume_filter_enabled and not passes_volume_filter(
+        frame,
+        end_index,
+        volume_lookback,
+        volume_low_ratio,
+        volume_max_low_bars,
+    ):
+        return None, "volume"
 
     entry_row = frame.iloc[end_index]
     if ema_frames is not None and not passes_ema200_filter(ema_frames, pd.Timestamp(entry_row["close_time"])):
-        return None
+        return None, "ema200"
 
     stage = entry_row.get("stage")
     normalized_stage = None if pd.isna(stage) else int(stage)
     expected_stage = infer_expected_stage(reference_label, reference_selector)
     if stage_confirm_enabled and expected_stage is not None and normalized_stage != expected_stage:
-        return None
+        return None, "stage_mismatch"
 
     abruptness = compute_abruptness(entry_row)
     if abruptness is not None and abruptness > max_abruptness:
-        return None
+        return None, "abruptness"
 
     entry_price = float(entry_row["close"])
     stop_loss_price, stop_loss_pct = compute_atr_stop_loss(entry_row, atr_stop_multiple)
@@ -734,25 +780,28 @@ def evaluate_match(
     exit_row = frame.iloc[actual_exit_index]
     r_value = (exit_price - entry_price) / entry_price
 
-    return TradeResult(
-        symbol=match.symbol,
-        timeframe=match.timeframe,
-        trend_label=match.trend_label,
-        reference_label=reference_label,
-        reference_selector=reference_selector,
-        period_start=match.period_start,
-        period_end=match.period_end,
-        entry_time=pd.Timestamp(entry_row["close_time"]),
-        exit_time=pd.Timestamp(exit_row["close_time"]),
-        entry_price=entry_price,
-        exit_price=exit_price,
-        r_value=r_value,
-        bars_forward=bars_forward,
-        stage=normalized_stage,
-        abruptness=abruptness,
-        stop_loss_price=stop_loss_price,
-        stop_loss_pct=stop_loss_pct,
-        stop_hit=stop_hit,
+    return (
+        TradeResult(
+            symbol=match.symbol,
+            timeframe=match.timeframe,
+            trend_label=match.trend_label,
+            reference_label=reference_label,
+            reference_selector=reference_selector,
+            period_start=match.period_start,
+            period_end=match.period_end,
+            entry_time=pd.Timestamp(entry_row["close_time"]),
+            exit_time=pd.Timestamp(exit_row["close_time"]),
+            entry_price=entry_price,
+            exit_price=exit_price,
+            r_value=r_value,
+            bars_forward=bars_forward,
+            stage=normalized_stage,
+            abruptness=abruptness,
+            stop_loss_price=stop_loss_price,
+            stop_loss_pct=stop_loss_pct,
+            stop_hit=stop_hit,
+        ),
+        None,
     )
 
 
@@ -1052,8 +1101,10 @@ def print_report(
     extension_factor: float,
     total_matches: int,
     skipped_matches: int,
+    skipped_by_volume: int,
     trades: list[TradeResult],
     ema200_filter_enabled: bool,
+    volume_filter_enabled: bool,
 ) -> None:
     metrics = summarize_trade_results(trades)
 
@@ -1063,9 +1114,11 @@ def print_report(
     print(f"Ext factor   : {extension_factor}")
     print(f"Exit bars    : {int(pattern_length * extension_factor)}")
     print(f"EMA200 filter: {'ON (30m + 4h)' if ema200_filter_enabled else 'OFF'}")
+    print(f"Volume filter: {'ON' if volume_filter_enabled else 'OFF'}")
     print(f"Matches      : {total_matches}")
     print(f"Evaluated    : {metrics['trade_count']}")
     print(f"Skipped      : {skipped_matches}")
+    print(f"Skipped vol  : {skipped_by_volume}")
     print("-" * 72)
 
     if not trades:
@@ -1123,6 +1176,7 @@ def main() -> None:
     ema_frames_by_symbol: dict[str, dict[str, pd.DataFrame]] = {}
     trades: list[TradeResult] = []
     skipped_matches = 0
+    skipped_by_volume = 0
     total_matches = 0
     generated_visualizations = 0
     visualization_requests: list[tuple[Path, str, str, str, pd.Timestamp, pd.Timestamp, str]] = []
@@ -1188,7 +1242,7 @@ def main() -> None:
                         }
                     ema_frames = ema_frames_by_symbol[db_symbol]
 
-                trade = evaluate_match(
+                trade, skip_reason = evaluate_match(
                     frame=symbol_frames[frame_key],
                     match=match,
                     pattern_length=pattern_length,
@@ -1199,9 +1253,15 @@ def main() -> None:
                     max_abruptness=args.max_abruptness,
                     stage_confirm_enabled=not args.disable_stage_confirm,
                     ema_frames=ema_frames,
+                    volume_filter_enabled=args.volume_filter,
+                    volume_lookback=args.volume_lookback,
+                    volume_low_ratio=args.volume_low_ratio,
+                    volume_max_low_bars=args.volume_max_low_bars,
                 )
                 if trade is None:
                     skipped_matches += 1
+                    if skip_reason == "volume":
+                        skipped_by_volume += 1
                     continue
                 trades.append(trade)
     finally:
@@ -1233,8 +1293,10 @@ def main() -> None:
         extension_factor=args.extension_factor,
         total_matches=total_matches,
         skipped_matches=skipped_matches,
+        skipped_by_volume=skipped_by_volume,
         trades=trades,
         ema200_filter_enabled=args.ema200_filter,
+        volume_filter_enabled=args.volume_filter,
     )
 
     if args.visualize:
@@ -1256,6 +1318,10 @@ def main() -> None:
             "extension_factor": args.extension_factor,
             "exit_bars": int(latest_pattern_length * args.extension_factor),
             "ema200_filter": args.ema200_filter,
+            "volume_filter": args.volume_filter,
+            "volume_lookback": args.volume_lookback,
+            "volume_low_ratio": args.volume_low_ratio,
+            "volume_max_low_bars": args.volume_max_low_bars,
             "atr_stop_multiple": args.atr_stop_multiple,
             "max_abruptness": args.max_abruptness,
             "stage_confirm_enabled": not args.disable_stage_confirm,
@@ -1264,6 +1330,7 @@ def main() -> None:
             "total_matches": total_matches,
             "evaluated_matches": len(trades),
             "skipped_matches": skipped_matches,
+            "skipped_by_volume": skipped_by_volume,
             **metrics,
         }
         print("-" * 72)
