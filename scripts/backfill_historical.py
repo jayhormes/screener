@@ -9,10 +9,13 @@
 import argparse
 import sqlite3
 import time
+import time as time_module
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 HISTORICAL_START = datetime(2021, 1, 1, tzinfo=timezone.utc)
 BINANCE_FAPI_KLINES = "https://fapi.binance.com/fapi/v1/klines"
@@ -24,6 +27,50 @@ INTERVAL_MS = {
     "2h": 2 * 60 * 60 * 1000,
     "4h": 4 * 60 * 60 * 1000,
 }
+
+WEIGHT_LIMIT = 1200
+WEIGHT_SAFE_RATIO = 0.6
+WEIGHT_PER_REQUEST = 2  # klines API 每個請求代價 2 weight
+SAFE_THRESHOLD = int(WEIGHT_LIMIT * WEIGHT_SAFE_RATIO)
+DEFAULT_REQUEST_INTERVAL = 0.2
+DEFAULT_BACKOFF_BASE_DELAY = 1.0
+DEFAULT_BACKOFF_MAX_DELAY = 30.0
+
+_weight_used = 0
+_weight_window_start = time_module.time()
+
+
+def create_session() -> requests.Session:
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[413, 429, 499, 500, 502, 503, 504],
+        respect_retry_after_header=True,
+        allowed_methods=frozenset(["GET"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def wait_if_needed(additional_weight: int = WEIGHT_PER_REQUEST):
+    global _weight_used, _weight_window_start
+
+    now = time_module.time()
+    if now - _weight_window_start >= 60.0:
+        _weight_used = 0
+        _weight_window_start = now
+
+    if _weight_used + additional_weight > SAFE_THRESHOLD:
+        wait_seconds = 60.0 - (now - _weight_window_start) + 1.0
+        print(f"  [Weight limit] {_weight_used}/{SAFE_THRESHOLD}, waiting {wait_seconds:.1f}s...")
+        time_module.sleep(max(0.5, wait_seconds))
+        _weight_used = 0
+        _weight_window_start = time_module.time()
+
+    _weight_used += additional_weight
 
 
 def get_db_path() -> Path:
@@ -48,7 +95,16 @@ def get_symbols(conn: sqlite3.Connection) -> list[str]:
     return [row[0] for row in cur.fetchall()]
 
 
-def paginate_fetch(symbol: str, timeframe: str, start_ts_ms: int, end_ts_ms: int) -> list:
+def paginate_fetch(
+    session: requests.Session,
+    symbol: str,
+    timeframe: str,
+    start_ts_ms: int,
+    end_ts_ms: int,
+    request_interval: float = DEFAULT_REQUEST_INTERVAL,
+    backoff_base_delay: float = DEFAULT_BACKOFF_BASE_DELAY,
+    backoff_max_delay: float = DEFAULT_BACKOFF_MAX_DELAY,
+) -> list:
     """
     從 Binance API 補填歷史數據（paginated）。
 
@@ -62,6 +118,7 @@ def paginate_fetch(symbol: str, timeframe: str, start_ts_ms: int, end_ts_ms: int
     interval_ms = INTERVAL_MS[timeframe]
     fetched_all = []
     current_start = start_ts_ms
+    consecutive_failures = 0
 
     while current_start < end_ts_ms:
         params = {
@@ -72,12 +129,32 @@ def paginate_fetch(symbol: str, timeframe: str, start_ts_ms: int, end_ts_ms: int
             "limit": 1500,
         }
         try:
-            resp = requests.get(BINANCE_FAPI_KLINES, params=params, timeout=10)
+            wait_if_needed()
+            resp = session.get(BINANCE_FAPI_KLINES, params=params, timeout=10)
+
+            if resp.status_code == 429:
+                retry_after_header = resp.headers.get("retry-after", "60")
+                try:
+                    retry_after = max(1, int(float(retry_after_header)))
+                except (TypeError, ValueError):
+                    retry_after = 60
+                print(f"  [429] Rate limited, waiting {retry_after}s...")
+                time_module.sleep(retry_after)
+                continue
+
             if resp.status_code != 200:
+                if resp.status_code in {413, 499, 500, 502, 503, 504}:
+                    delay = min(backoff_max_delay, backoff_base_delay * (2 ** consecutive_failures))
+                    consecutive_failures += 1
+                    print(f"  [HTTP {resp.status_code}] Backing off for {delay:.1f}s...")
+                    time_module.sleep(delay)
+                    continue
+
                 print(f"  API error {resp.status_code}: {resp.text[:100]}")
                 break
 
             data = resp.json()
+            consecutive_failures = 0
             if not data:
                 break
 
@@ -91,7 +168,17 @@ def paginate_fetch(symbol: str, timeframe: str, start_ts_ms: int, end_ts_ms: int
                 break
 
             current_start = next_start
-            time.sleep(0.2)  # 避免觸發 rate limit
+
+            # Safety check: expected progress should be at least one interval
+            if last_close < current_start - interval_ms:
+                print(f"  Warning: pagination advanced less than expected for {symbol} {timeframe}")
+
+            time.sleep(max(0.0, request_interval))
+        except requests.RequestException as exc:
+            delay = min(backoff_max_delay, backoff_base_delay * (2 ** consecutive_failures))
+            consecutive_failures += 1
+            print(f"  Request failed: {exc}; backing off for {delay:.1f}s...")
+            time_module.sleep(delay)
         except Exception as exc:
             print(f"  Request failed: {exc}")
             break
@@ -142,7 +229,14 @@ def upsert_klines(conn: sqlite3.Connection, symbol: str, timeframe: str, klines:
     return count
 
 
-def backfill_timeframe(timeframe: str, dry_run: bool = True):
+def backfill_timeframe(
+    timeframe: str,
+    dry_run: bool = True,
+    sleep_between: float = 3.0,
+    request_interval: float = DEFAULT_REQUEST_INTERVAL,
+    backoff_base_delay: float = DEFAULT_BACKOFF_BASE_DELAY,
+    backoff_max_delay: float = DEFAULT_BACKOFF_MAX_DELAY,
+):
     """
     對一個 timeframe 補填所有 symbol 的歷史數據。
 
@@ -155,6 +249,7 @@ def backfill_timeframe(timeframe: str, dry_run: bool = True):
     """
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
+    session = create_session()
 
     try:
         symbols = get_symbols(conn)
@@ -169,11 +264,15 @@ def backfill_timeframe(timeframe: str, dry_run: bool = True):
             oldest = get_db_oldest_open(conn, symbol, timeframe)
             if oldest is None:
                 print(f"[{index}/{len(symbols)}] {symbol}: No data, skipping")
+                if index < len(symbols):
+                    time_module.sleep(max(0.0, sleep_between))
                 continue
 
             oldest_dt = datetime.fromtimestamp(oldest / 1000, tz=timezone.utc)
             if oldest_dt <= HISTORICAL_START:
                 print(f"[{index}/{len(symbols)}] {symbol}: Already covered to {oldest_dt.date()}, skipping")
+                if index < len(symbols):
+                    time_module.sleep(max(0.0, sleep_between))
                 continue
 
             # 需要補填的範圍：HISTORICAL_START ~ oldest
@@ -187,14 +286,27 @@ def backfill_timeframe(timeframe: str, dry_run: bool = True):
 
             if dry_run:
                 print(f"  [DRY RUN] Would fetch from {start_ts} to {end_ts}")
-                continue
+            else:
+                klines = paginate_fetch(
+                    session=session,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_ts_ms=start_ts,
+                    end_ts_ms=end_ts,
+                    request_interval=request_interval,
+                    backoff_base_delay=backoff_base_delay,
+                    backoff_max_delay=backoff_max_delay,
+                )
+                if klines:
+                    inserted = upsert_klines(conn, symbol, timeframe, klines)
+                    print(f"  Inserted {inserted}/{len(klines)} klines")
 
-            klines = paginate_fetch(symbol, timeframe, start_ts, end_ts)
-            if klines:
-                inserted = upsert_klines(conn, symbol, timeframe, klines)
-                print(f"  Inserted {inserted}/{len(klines)} klines")
+            if index < len(symbols):
+                time_module.sleep(max(0.0, sleep_between))
     finally:
+        session.close()
         conn.close()
+
 
 
 def main():
@@ -211,6 +323,30 @@ def main():
         action="store_true",
         help="Show what would be done without fetching data",
     )
+    parser.add_argument(
+        "--sleep-between",
+        type=float,
+        default=3.0,
+        help="Seconds to sleep between symbols",
+    )
+    parser.add_argument(
+        "--request-interval",
+        type=float,
+        default=DEFAULT_REQUEST_INTERVAL,
+        help="Seconds to sleep between paginated requests",
+    )
+    parser.add_argument(
+        "--backoff-base-delay",
+        type=float,
+        default=DEFAULT_BACKOFF_BASE_DELAY,
+        help="Base delay in seconds for retry backoff",
+    )
+    parser.add_argument(
+        "--backoff-max-delay",
+        type=float,
+        default=DEFAULT_BACKOFF_MAX_DELAY,
+        help="Maximum delay in seconds for retry backoff",
+    )
     args = parser.parse_args()
 
     if args.timeframe == "all":
@@ -219,7 +355,14 @@ def main():
         timeframes = [args.timeframe]
 
     for timeframe in timeframes:
-        backfill_timeframe(timeframe, dry_run=args.dry_run)
+        backfill_timeframe(
+            timeframe,
+            dry_run=args.dry_run,
+            sleep_between=args.sleep_between,
+            request_interval=args.request_interval,
+            backoff_base_delay=args.backoff_base_delay,
+            backoff_max_delay=args.backoff_max_delay,
+        )
 
 
 if __name__ == "__main__":
